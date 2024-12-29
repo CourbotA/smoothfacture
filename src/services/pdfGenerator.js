@@ -27,7 +27,9 @@ export function generatePdf(invoiceData) {
   const topMarginLogo = 20;
 
   // 4) Place Logo (optional)
-  doc.addImage(myLogo, 'PNG', leftMargin, topMarginLogo, 40, 40);
+  if (myLogo) { // Ensure logo exists
+    doc.addImage(myLogo, 'PNG', leftMargin, topMarginLogo, 40, 40);
+  }
 
   // 5) Invoice Title & Dates (top-right)
   const rightBlockX = 380; 
@@ -44,7 +46,6 @@ export function generatePdf(invoiceData) {
   invoiceBlockY += 12;
   doc.text(`Échéance: ${invoiceData.dueDate}`, rightBlockX, invoiceBlockY);
   invoiceBlockY += 12;
-  doc.text(`Type d'opération: ${invoiceData.operationType}`, rightBlockX, invoiceBlockY);
 
   // 6) Sender & Recipient side by side
   const contactBlockY = 120;
@@ -60,7 +61,8 @@ export function generatePdf(invoiceData) {
   // Sender address, phone, email in NORMAL, each on separate lines
   doc.setFont('Helvetica', 'normal');
   const senderLines = s.address.split('\n');
-  senderLines.push(s.phone, s.email); // each is a line
+  if (s.phone) senderLines.push(s.phone);
+  if (s.email) senderLines.push(s.email);
   let senderY = contactBlockY + 16;  
   senderLines.forEach(line => {
     doc.text(line, leftMargin, senderY);
@@ -97,10 +99,12 @@ export function generatePdf(invoiceData) {
   currentY += wrappedIntervention.length * 14;
 
   // Additional detail lines
-  intervention.details.forEach(detailLine => {
-    currentY += 12;
-    doc.text(detailLine, leftMargin, currentY);
-  });
+  if (intervention.details && Array.isArray(intervention.details)) {
+    intervention.details.forEach(detailLine => {
+      currentY += 12;
+      doc.text(detailLine, leftMargin, currentY);
+    });
+  }
 
   // 8) Items Table
   currentY += 25; 
@@ -123,7 +127,7 @@ export function generatePdf(invoiceData) {
     },
     headStyles: { fillColor: [200, 200, 200] },
     margin: { left: leftMargin, right: 40 },
-    tableWidth: 515,
+    tableWidth: 'auto', // Changed from fixed to 'auto' for better responsiveness
     columnStyles: {
       0: { cellWidth: 160 },
       1: { cellWidth: 70 },
@@ -191,8 +195,10 @@ export function generatePdf(invoiceData) {
   paymentStartY += 12;
   doc.text(`IBAN: ${invoiceData.payment.iban}`, leftMargin, paymentStartY);
   paymentStartY += 12;
-  doc.text(invoiceData.payment.tvaNote, leftMargin, paymentStartY);
-  paymentStartY += 12;
+  if (invoiceData.payment.tvaNote) {
+    doc.text(invoiceData.payment.tvaNote, leftMargin, paymentStartY);
+    paymentStartY += 12;
+  }
   doc.text(`Conditions de paiement: ${invoiceData.payment.conditions}`, leftMargin, paymentStartY);
 
   // 11) Footer

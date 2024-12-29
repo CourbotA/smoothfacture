@@ -10,30 +10,16 @@ export function parseEmail(emailText) {
 
   // Helper to insert a newline before any 5-digit zip code
   function splitLineByZip(line) {
-    // e.g. transforms "2 bis rue des dominicains 62000 Arras"
-    // into "2 bis rue des dominicains\n62000 Arras"
-    // if it finds a 5-digit sequence
     const zipRegex = /(\s)(\d{5})(\b)/;
-    // Explanation:
-    //  (\s) => a whitespace
-    //  (\d{5}) => 5 digits
-    //  (\b) => word boundary
-    //
-    // Then we'll insert a newline before the 5-digit group
-    // so the replaced string becomes "2 bis ...\n62000 Arras"
     return line.replace(zipRegex, '\n$2');
   }
 
   // Basic fields from the first 3 lines
   const clientName = lines[0] || 'Client inconnu';
-  // The second line might contain the address with a zip code
   const rawClientAddress = lines[1] || 'Adresse inconnue';
-  // Split on the zip code if found
   const clientAddress = splitLineByZip(rawClientAddress);
 
   let currentDate = lines[2] || 'Date non précisée';
-
-  // For multiple date lines
   const allDatesUsed = new Set();
   if (currentDate !== 'Date non précisée') {
     allDatesUsed.add(currentDate);
@@ -49,15 +35,14 @@ export function parseEmail(emailText) {
   // Regexes
   const dateRegex = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/i;
   const interventionRegex = /^intervention\s+(.*)$/i;
-  const trailingPriceRegex = /^(.+?)\s+(\d+(?:\.\d+)?)\s*€$/;
+  const trailingPriceRegex = /^(.+?)\s+(\d+(?:[\.,]\d+)?)\s*€$/i;
 
-  // We'll use a simple flag to know if we’re capturing “Combustion” lines
+  // We'll use a simple flag to know if we’re capturing "Combustion" lines
   let capturingCombustion = false;
 
   restLines.forEach(line => {
     // If we are currently capturing combustion lines...
     if (capturingCombustion) {
-      // Stop capturing if line is blank or matches a recognized pattern
       if (
         !line ||
         dateRegex.test(line) ||
@@ -65,10 +50,9 @@ export function parseEmail(emailText) {
         interventionRegex.test(line) ||
         /^combustion$/i.test(line)
       ) {
-        capturingCombustion = false; // stop capturing
-        // Process this line as normal, so fall through
+        capturingCombustion = false;
+        // Process this line as normal
       } else {
-        // Otherwise, add it to combustionLines
         combustionLines.push(line);
         return; // skip further checks
       }
@@ -94,11 +78,20 @@ export function parseEmail(emailText) {
       return;
     }
 
-    // (C) Check for item line with trailing "XX€"
+    // (C) Check for multiplicative item "XXX  20*1.95€   39"
+    const multiItem = parseMultiplicativeItem(line);
+    if (multiItem) {
+      // Insert the current date into that item
+      multiItem.date = currentDate;
+      items.push(multiItem);
+      return;
+    }
+
+    // (D) Check for item line with trailing "XX €"
     const priceMatch = line.match(trailingPriceRegex);
     if (priceMatch) {
       const leftoverDesc = priceMatch[1].trim();
-      const totalNum = parseFloat(priceMatch[2]) || 0;
+      const totalNum = parseFloat(priceMatch[2].replace(',', '.')) || 0;
       const totalStr = formatEuro(totalNum);
 
       // Attempt to parse hour-based pattern like "3h*35"
@@ -124,7 +117,7 @@ export function parseEmail(emailText) {
         });
       }
     } else {
-      // (D) Just a normal description line
+      // (E) Just a normal description line
       descriptionLines.push(line);
     }
   });
@@ -143,10 +136,8 @@ export function parseEmail(emailText) {
 
   // Return the structured data
   return {
-    // Adjust operationType if you prefer
     operationType: 'Entretien chaudière gaz',
 
-    // Sender data (Gerard)
     sender: {
       name: 'Courbot Gerard',
       address: '4 rue bourbon\n62690 aubigny en artois',
@@ -154,35 +145,29 @@ export function parseEmail(emailText) {
       email: 'gerardcourbot@gmail.com'
     },
 
-    // Client
     client: {
       name: clientName,
       address: clientAddress
     },
 
-    // Intervention
     intervention: {
       date: currentDate,
       address: interventionHeader,
       details: descriptionLines
     },
 
-    // Items
     items,
 
-    // Combustion lines (may be empty)
     combustion: {
       lines: combustionLines
     },
 
-    // Payment
     payment: {
       iban: 'FR76 1670 6000 7101 3972 9000 019',
       tvaNote: 'TVA non applicable aer.293B du CGI',
       conditions: '30 jours'
     },
 
-    // Footer
     footer: {
       enterprise: 'Courbot Gerard - micro entreprise',
       fullAddress: '4 rue bourbon 62690 aubigny en artois',
@@ -193,7 +178,63 @@ export function parseEmail(emailText) {
 }
 
 /**
- * parseHourBasedItem('3h*35') -> {description, quantity, unitPrice}
+ * Attempts to parse lines like:
+ * "Fourniture tube multicouche diamètre 16  20*1.95€                        39 €"
+ *
+ *  -> leftoverDesc = "Fourniture tube multicouche diamètre 16"
+ *  -> quantity = 20
+ *  -> maybe unit = "m" (if we detect "m" in or after the quantity)
+ *  -> unitPrice = 1.95
+ *  -> total = 39
+ */
+function parseMultiplicativeItem(line) {
+  // A regex capturing:
+  //  (1) Description (greedy, up to whitespace)
+  //  (2) quantity
+  //  (3) unit price
+  //  (4) total
+  //
+  // e.g.: "My desc    20*1.95€   39"
+  // capturing groups: [1]="My desc", [2]="20", [3]="1.95", [4]="39"
+  //
+  // Adjust the regex if your input lines vary.
+  const multiRegex = /^(.*?)\s+(\d+)\*([\d,\.]+)€\s+([\d,\.]+)/;
+  const match = line.match(multiRegex);
+  if (!match) return null;
+
+  let leftoverDesc = match[1].trim();
+  const quantityStr = match[2];
+  let unitPriceStr = match[3];
+  let totalStr = match[4];
+
+  // Convert to pure numbers for safe float parsing
+  unitPriceStr = unitPriceStr.replace(',', '.');
+  totalStr = totalStr.replace(',', '.');
+
+  const quantity = parseFloat(quantityStr);
+  const unitPrice = parseFloat(unitPriceStr);
+  const totalVal = parseFloat(totalStr);
+
+  // Detect if "m" is intended as a unit (e.g. "20m*1.95€" or leftoverDesc includes "diamètre 16")
+  // This is optional. You can also just return "pce".
+  let unit = 'pce';
+  // If you want to interpret everything as "m", do it here:
+  // e.g. if your domain is always "m" for this type of item:
+  unit = 'm';
+
+  return {
+    description: leftoverDesc,    // e.g. "Fourniture tube multicouche diamètre 16"
+    date: '',                     // we’ll fill this in parseEmail()
+    quantity: formatQty(quantity),
+    unit,
+    unitPrice: formatEuro(unitPrice),
+    total: formatEuro(totalVal)
+  };
+}
+
+/**
+ * parseHourBasedItem('3h*35') -> { description, quantity, unitPrice }
+ * (unchanged)
  */
 function parseHourBasedItem(line) {
   const priceRegex = /(?:\*|x)\s*(\d+(?:\.\d+)?)/;
@@ -219,7 +260,6 @@ function parseHourBasedItem(line) {
 }
 
 function convertHourStringToFloat(str) {
-  // e.g. "1h30" => 1.5
   const match = str.match(/(\d+(?:\.\d+)?)h(\d+)?/i);
   if (match) {
     let hours = parseFloat(match[1]) || 0;
@@ -232,6 +272,7 @@ function convertHourStringToFloat(str) {
 function formatEuro(num) {
   return num.toFixed(2).replace('.', ',') + ' €';
 }
+
 function formatQty(num) {
   return num.toFixed(2).replace('.', ',');
 }
