@@ -4,7 +4,7 @@ import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import myLogo from '../styles/logo.png'; // Adjust the path as necessary
 
-let invoiceCounter = 56; // Start numbering
+let invoiceCounter = 58; // Start numbering
 
 export function generatePdf(invoiceData) {
   try {

@@ -31,24 +31,16 @@ export function parseEmail(emailText) {
   let capturingCombustion = false;
 
   // Regex patterns
-  const dateRegex = /^(\d{2}\/\d{2}\/\d{4})$/i; // Matches dates like 29/11/2024
+  const dateRegex = /^(\d{2}\/\d{2}\/\d{4})$/i; // Matches dates like 28/11/2024
   const itemPriceRegex = /([\d,\.]+)€$/i; // Matches price at the end of the line
   const itemLineRegex = /^-?\s*(.+)$/; // Matches lines starting with '-' or not
 
   restLines.forEach(line => {
     // If currently capturing combustion lines
     if (capturingCombustion) {
-      if (
-        dateRegex.test(line) ||
-        itemLineRegex.test(line) ||
-        /^Intervention\s+/i.test(line)
-      ) {
-        capturingCombustion = false;
-        // Continue processing this line normally
-      } else {
-        combustionLines.push(line);
-        return; // Skip further checks for this line
-      }
+      // Continue capturing all lines as combustion data
+      combustionLines.push(line);
+      return; // Skip further checks for this line
     }
 
     // Check if the line starts the combustion block
@@ -67,7 +59,7 @@ export function parseEmail(emailText) {
     // Check if the line is a date
     const dateMatch = line.match(dateRegex);
     if (dateMatch) {
-      currentDate = dateMatch[1]; // e.g., '29/11/2024'
+      currentDate = dateMatch[1]; // e.g., '28/11/2024'
       return;
     }
 
