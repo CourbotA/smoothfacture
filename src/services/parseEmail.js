@@ -1,8 +1,8 @@
+// parseEmail.js
+
 /**
- * parseEmail.js
- *
  * Reads raw email text and returns a structured invoiceData object.
- * Also parses a "Combustion" block if found.
+ * Parses descriptions with interleaved dates and assigns dates to items.
  */
 
 export function parseEmail(emailText) {
@@ -18,121 +18,98 @@ export function parseEmail(emailText) {
   const clientName = lines[0] || 'Client inconnu';
   const rawClientAddress = lines[1] || 'Adresse inconnue';
   const clientAddress = splitLineByZip(rawClientAddress);
+  const interventionPlaceLine = lines[2] || 'Intervention inconnue';
 
-  let currentDate = lines[2] || 'Date non précisée';
-  const allDatesUsed = new Set();
-  if (currentDate !== 'Date non précisée') {
-    allDatesUsed.add(currentDate);
-  }
+  // Initialize variables
+  let interventionPlace = ''; 
+  const restLines = lines.slice(3); // Start processing from the fourth line
 
-  let interventionPlace = 'Lieu non spécifié';
-  const restLines = lines.slice(3);
-
-  const descriptionLines = [];
+  const descriptionEntries = []; // Array of { date, description }
   const items = [];
   const combustionLines = [];
-
-  // Regexes
-  const dateRegex = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/i;
-  const interventionRegex = /^intervention\s+(.*)$/i;
-  const trailingPriceRegex = /^(.+?)\s+(\d+(?:[\.,]\d+)?)\s*€$/i;
-
-  // We'll use a simple flag to know if we’re capturing "Combustion" lines
+  let currentDate = ''; // To track the current intervention date
   let capturingCombustion = false;
 
+  // Regex patterns
+  const dateRegex = /^(\d{2}\/\d{2}\/\d{4})$/i; // Matches dates like 29/11/2024
+  const itemPriceRegex = /([\d,\.]+)€$/i; // Matches price at the end of the line
+  const itemLineRegex = /^-?\s*(.+)$/; // Matches lines starting with '-' or not
+
   restLines.forEach(line => {
-    // If we are currently capturing combustion lines...
+    // If currently capturing combustion lines
     if (capturingCombustion) {
       if (
-        !line ||
         dateRegex.test(line) ||
-        trailingPriceRegex.test(line) ||
-        interventionRegex.test(line) ||
-        /^combustion$/i.test(line)
+        itemLineRegex.test(line) ||
+        /^Intervention\s+/i.test(line)
       ) {
         capturingCombustion = false;
-        // Process this line as normal
+        // Continue processing this line normally
       } else {
         combustionLines.push(line);
-        return; // skip further checks
+        return; // Skip further checks for this line
       }
     }
 
-    // Check if line is exactly "Combustion"
+    // Check if the line starts the combustion block
     if (!capturingCombustion && /^combustion$/i.test(line)) {
       capturingCombustion = true;
       return;
     }
 
-    // (A) Check if it's a date line
-    if (dateRegex.test(line)) {
-      currentDate = line;
-      allDatesUsed.add(line);
+    // Check if the line specifies the intervention place
+    const interventionMatch = line.match(/^Intervention\s+(.*)$/i);
+    if (interventionMatch) {
+      interventionPlace = interventionMatch[1].trim();
       return;
     }
 
-    // (B) Check if it's "intervention ..." line
-    const placeMatch = line.match(interventionRegex);
-    if (placeMatch) {
-      interventionPlace = placeMatch[1].trim();
+    // Check if the line is a date
+    const dateMatch = line.match(dateRegex);
+    if (dateMatch) {
+      currentDate = dateMatch[1]; // e.g., '29/11/2024'
       return;
     }
 
-    // (C) Check for multiplicative item "XXX  20*1.95€   39"
-    const multiItem = parseMultiplicativeItem(line);
-    if (multiItem) {
-      // Insert the current date into that item
-      multiItem.date = currentDate;
-      items.push(multiItem);
-      return;
-    }
-
-    // (D) Check for item line with trailing "XX €"
-    const priceMatch = line.match(trailingPriceRegex);
-    if (priceMatch) {
-      const leftoverDesc = priceMatch[1].trim();
-      const totalNum = parseFloat(priceMatch[2].replace(',', '.')) || 0;
-      const totalStr = formatEuro(totalNum);
-
-      // Attempt to parse hour-based pattern like "3h*35"
-      const parsed = parseHourBasedItem(leftoverDesc);
-      if (parsed) {
-        items.push({
-          description: parsed.description,
-          date: currentDate,
-          quantity: formatQty(parsed.quantity),
-          unit: 'h',
-          unitPrice: formatEuro(parsed.unitPrice),
-          total: totalStr
-        });
+    // Check if the line is an item
+    const itemMatch = line.match(itemLineRegex);
+    if (itemMatch) {
+      const itemLine = itemMatch[1].trim();
+      const parsedItem = parseItemLine(itemLine, currentDate);
+      if (parsedItem) {
+        items.push(parsedItem);
       } else {
-        // fallback: quantity=1
-        items.push({
-          description: leftoverDesc,
-          date: currentDate,
-          quantity: '1,00',
-          unit: 'pce',
-          unitPrice: totalStr,
-          total: totalStr
-        });
+        // If not an item line, treat it as a description
+        if (currentDate) {
+          const existingEntry = descriptionEntries.find(entry => entry.date === currentDate);
+          if (existingEntry) {
+            existingEntry.description += `\n${itemLine}`;
+          } else {
+            descriptionEntries.push({
+              date: currentDate,
+              description: itemLine
+            });
+          }
+        } else {
+          // Description without a date
+          descriptionEntries.push({
+            date: '-',
+            description: line
+          });
+        }
       }
-    } else {
-      // (E) Just a normal description line
-      descriptionLines.push(line);
+      return;
     }
+
+    // If none of the above, treat it as a description line without a date
+    descriptionEntries.push({
+      date: '-',
+      description: line
+    });
   });
 
-  // If no explicit "intervention ..." line, fallback to client address
-  if (interventionPlace === 'Lieu non spécifié') {
-    interventionPlace = clientAddress;
-  }
-
   // Build the Intervention header
-  const allDatesArray = Array.from(allDatesUsed);
-  let interventionHeader = `Intervention ${interventionPlace}`;
-  if (allDatesArray.length) {
-    interventionHeader += ` ${allDatesArray.join(', ')}`;
-  }
+  const interventionHeader = `Intervention ${interventionPlaceLine}`;
 
   // Return the structured data
   return {
@@ -151,9 +128,8 @@ export function parseEmail(emailText) {
     },
 
     intervention: {
-      date: currentDate,
-      address: interventionHeader,
-      details: descriptionLines
+      address: interventionHeader, // e.g., "Intervention Locataire 17A Aubigny-en-artois"
+      descriptions: descriptionEntries // Array of { date, description }
     },
 
     items,
@@ -170,7 +146,7 @@ export function parseEmail(emailText) {
 
     footer: {
       enterprise: 'Courbot Gerard - micro entreprise',
-      fullAddress: '4 rue bourbon 62690 aubigny en artois',
+      fullAddress: '4 rue bourbon\n62690 aubigny en artois',
       siret: '538 179 649 00016',
       ape: '4322A'
     }
@@ -178,101 +154,107 @@ export function parseEmail(emailText) {
 }
 
 /**
- * Attempts to parse lines like:
- * "Fourniture tube multicouche diamètre 16  20*1.95€                        39 €"
+ * Parses an item line and assigns the current date.
  *
- *  -> leftoverDesc = "Fourniture tube multicouche diamètre 16"
- *  -> quantity = 20
- *  -> maybe unit = "m" (if we detect "m" in or after the quantity)
- *  -> unitPrice = 1.95
- *  -> total = 39
+ * @param {string} line - The item line to parse.
+ * @param {string} currentDate - The current intervention date.
+ * @returns {object|null} - Parsed item object or null if parsing fails.
  */
-function parseMultiplicativeItem(line) {
-  // A regex capturing:
-  //  (1) Description (greedy, up to whitespace)
-  //  (2) quantity
-  //  (3) unit price
-  //  (4) total
-  //
-  // e.g.: "My desc    20*1.95€   39"
-  // capturing groups: [1]="My desc", [2]="20", [3]="1.95", [4]="39"
-  //
-  // Adjust the regex if your input lines vary.
-  const multiRegex = /^(.*?)\s+(\d+)\*([\d,\.]+)€\s+([\d,\.]+)/;
-  const match = line.match(multiRegex);
-  if (!match) return null;
+function parseItemLine(line, currentDate) {
+  // Pattern 4: Description followed by quantity*unitPrice€ total€
+  const pattern4 = /^(.+?)\s+(\d+)(?:\s*(\w+))?\*([\d,\.]+)€\s+([\d,\.]+)€$/i;
+  const match4 = line.match(pattern4);
+  if (match4) {
+    const description = match4[1].trim();
+    const quantity = parseFloat(match4[2].replace(',', '.'));
+    const unit = match4[3] ? match4[3].toLowerCase() : 'pce'; // Default to 'pce' if unit is missing
+    const unitPrice = parseFloat(match4[4].replace(',', '.'));
+    const total = parseFloat(match4[5].replace(',', '.'));
 
-  let leftoverDesc = match[1].trim();
-  const quantityStr = match[2];
-  let unitPriceStr = match[3];
-  let totalStr = match[4];
+    return {
+      description,
+      date: currentDate || '-', // Assign currentDate or '-' if not available
+      quantity: formatQty(quantity),
+      unit,
+      unitPrice: formatEuro(unitPrice),
+      total: formatEuro(total)
+    };
+  }
 
-  // Convert to pure numbers for safe float parsing
-  unitPriceStr = unitPriceStr.replace(',', '.');
-  totalStr = totalStr.replace(',', '.');
+  // Pattern 1: Description followed by quantity, unit, '*', unit price, and total
+  const pattern1 = /^(.+?)\s+(\d+[.,]?\d*)\s*(h|pce)\s*\*\s*([\d,\.]+)€\s+([\d,\.]+)€$/i;
+  const match1 = line.match(pattern1);
+  if (match1) {
+    const description = match1[1].trim();
+    const quantity = parseFloat(match1[2].replace(',', '.'));
+    const unit = match1[3].toLowerCase();
+    const unitPrice = parseFloat(match1[4].replace(',', '.'));
+    const total = parseFloat(match1[5].replace(',', '.'));
 
-  const quantity = parseFloat(quantityStr);
-  const unitPrice = parseFloat(unitPriceStr);
-  const totalVal = parseFloat(totalStr);
+    return {
+      description,
+      date: currentDate || '-', // Assign currentDate or '-' if not available
+      quantity: formatQty(quantity),
+      unit,
+      unitPrice: formatEuro(unitPrice),
+      total: formatEuro(total)
+    };
+  }
 
-  // Detect if "m" is intended as a unit (e.g. "20m*1.95€" or leftoverDesc includes "diamètre 16")
-  // This is optional. You can also just return "pce".
-  let unit = 'pce';
-  // If you want to interpret everything as "m", do it here:
-  // e.g. if your domain is always "m" for this type of item:
-  unit = 'm';
+  // Pattern 2: Description followed by unit price only (no quantity/unit)
+  const pattern2 = /^(.+?)\s+([\d,\.]+)€$/i;
+  const match2 = line.match(pattern2);
+  if (match2) {
+    const description = match2[1].trim();
+    const unitPrice = parseFloat(match2[2].replace(',', '.'));
 
-  return {
-    description: leftoverDesc,    // e.g. "Fourniture tube multicouche diamètre 16"
-    date: '',                     // we’ll fill this in parseEmail()
-    quantity: formatQty(quantity),
-    unit,
-    unitPrice: formatEuro(unitPrice),
-    total: formatEuro(totalVal)
-  };
+    return {
+      description,
+      date: currentDate || '-', // Assign currentDate or '-' if not available
+      quantity: '1,00', // Default quantity
+      unit: 'pce',      // Default unit
+      unitPrice: formatEuro(unitPrice),
+      total: formatEuro(unitPrice) // Assuming quantity = 1
+    };
+  }
+
+  // Pattern 3: Description followed by code and price (e.g., "remplacement robinet WC 12/17   4,50€")
+  const pattern3 = /^(.+?)\s+[\d\/]+\s+([\d,\.]+)€$/i;
+  const match3 = line.match(pattern3);
+  if (match3) {
+    const description = match3[1].trim();
+    const unitPrice = parseFloat(match3[2].replace(',', '.'));
+
+    return {
+      description,
+      date: currentDate || '-', // Assign currentDate or '-' if not available
+      quantity: '1,00', // Default quantity
+      unit: 'pce',      // Default unit
+      unitPrice: formatEuro(unitPrice),
+      total: formatEuro(unitPrice) // Assuming quantity = 1
+    };
+  }
+
+  // If no patterns match, return null
+  return null;
 }
 
 /**
- * parseHourBasedItem('3h*35') -> { description, quantity, unitPrice }
- * (unchanged)
+ * Formats a number to "xx,xx €".
+ *
+ * @param {number} num - The number to format.
+ * @returns {string} - Formatted string.
  */
-function parseHourBasedItem(line) {
-  const priceRegex = /(?:\*|x)\s*(\d+(?:\.\d+)?)/;
-  const priceMatch = line.match(priceRegex);
-  if (!priceMatch) return null;
-
-  const unitPriceNum = parseFloat(priceMatch[1]);
-  let lineWithoutPrice = line.replace(priceRegex, '').trim();
-
-  const hourRegex = /(\d+(?:\.\d+)?h\d*|\d+h\d*)/i;
-  const hourMatch = lineWithoutPrice.match(hourRegex);
-  if (!hourMatch) return null;
-
-  const hourStr = hourMatch[0];
-  const quantity = convertHourStringToFloat(hourStr);
-  let lineWithoutHours = lineWithoutPrice.replace(hourRegex, '').trim();
-
-  return {
-    description: lineWithoutHours,
-    quantity,
-    unitPrice: unitPriceNum
-  };
-}
-
-function convertHourStringToFloat(str) {
-  const match = str.match(/(\d+(?:\.\d+)?)h(\d+)?/i);
-  if (match) {
-    let hours = parseFloat(match[1]) || 0;
-    let minutes = match[2] ? parseInt(match[2], 10) : 0;
-    return hours + minutes / 60;
-  }
-  return parseFloat(str) || 1;
-}
-
 function formatEuro(num) {
   return num.toFixed(2).replace('.', ',') + ' €';
 }
 
+/**
+ * Formats a quantity to "x,xx".
+ *
+ * @param {number} num - The quantity to format.
+ * @returns {string} - Formatted string.
+ */
 function formatQty(num) {
   return num.toFixed(2).replace('.', ',');
 }

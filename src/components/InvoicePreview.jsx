@@ -4,8 +4,14 @@ function InvoicePreview({ invoiceData }) {
   if (!invoiceData) return null;
 
   const {
-    sender, client, intervention, items,
-    operationType, payment, footer, combustion
+    sender,
+    client,
+    intervention,
+    items,
+    operationType,
+    payment,
+    footer,
+    combustion
   } = invoiceData;
 
   const invoiceNumber = invoiceData.invoiceNumber || 'N/A';
@@ -20,21 +26,21 @@ function InvoicePreview({ invoiceData }) {
   const totalHT = formatEuro(totalHTNum);
   const tvaRate = '0,00 %';
   const tvaAmount = '0,00 €';
-  const totalTTC = totalHT;
+  const totalTTC = formatEuro(totalHTNum); // Assuming no TVA
 
   return (
     <div style={styles.previewContainer}>
       {/* Header: Sender and Receiver */}
       <div style={styles.header}>
         <div style={styles.block}>
-          {/* Gerard in normal font */}
+          {/* Sender Information */}
           <div>{sender.name}</div>
           <div>{sender.address}</div>
           <div>{sender.phone}</div>
           <div>{sender.email}</div>
         </div>
         <div style={styles.block}>
-          {/* Invoice Info in top-right */}
+          {/* Invoice Information */}
           <div style={{ textAlign: 'right', fontSize: '1.1rem', fontWeight: 'bold' }}>
             FACTURE - {invoiceNumber}
           </div>
@@ -50,12 +56,25 @@ function InvoicePreview({ invoiceData }) {
         </div>
       </div>
 
-      {/* Intervention */}
+      {/* Intervention with Descriptions and Dates */}
       <div style={styles.interventionBlock}>
         <div>{intervention.address}</div>
-        {intervention.details.map((line, idx) => (
-          <div key={idx}>{line}</div>
-        ))}
+        {intervention.descriptions && intervention.descriptions.length > 0 ? (
+          intervention.descriptions.map((entry, idx) => (
+            <div key={idx} style={styles.descriptionEntry}>
+              {entry.date !== '-' && (
+                <div style={styles.dateText}>{entry.date}</div>
+              )}
+              <div style={styles.descriptionText}>
+                {entry.description.split('\n').map((line, i) => (
+                  <div key={i}>{line}</div>
+                ))}
+              </div>
+            </div>
+          ))
+        ) : (
+          <div>No descriptions available.</div>
+        )}
       </div>
 
       {/* Items Table */}
@@ -71,16 +90,22 @@ function InvoicePreview({ invoiceData }) {
           </tr>
         </thead>
         <tbody>
-          {items.map((item, i) => (
-            <tr key={i}>
-              <td>{item.description}</td>
-              <td>{item.date}</td>
-              <td>{item.quantity}</td>
-              <td>{item.unit}</td>
-              <td>{item.unitPrice}</td>
-              <td>{item.total}</td>
+          {items && items.length > 0 ? (
+            items.map((item, i) => (
+              <tr key={i}>
+                <td>{item.description}</td>
+                <td>{item.date !== '-' ? item.date : '-'}</td>
+                <td>{item.quantity}</td>
+                <td>{item.unit}</td>
+                <td>{item.unitPrice}</td>
+                <td>{item.total}</td>
+              </tr>
+            ))
+          ) : (
+            <tr>
+              <td colSpan="6" style={{ textAlign: 'center' }}>No items available.</td>
             </tr>
-          ))}
+          )}
         </tbody>
       </table>
 
@@ -105,7 +130,7 @@ function InvoicePreview({ invoiceData }) {
       <div style={styles.paymentBlock}>
         <strong>Moyens de paiement:</strong><br />
         IBAN: {payment.iban}<br />
-        {payment.tvaNote}<br />
+        {payment.tvaNote && `${payment.tvaNote}`}<br />
         Conditions de paiement: {payment.conditions}
       </div>
 
@@ -150,6 +175,16 @@ const styles = {
   },
   interventionBlock: {
     marginBottom: '1rem',
+  },
+  descriptionEntry: {
+    marginTop: '0.5rem',
+  },
+  dateText: {
+    fontWeight: 'bold',
+    marginBottom: '0.25rem',
+  },
+  descriptionText: {
+    marginLeft: '1rem',
   },
   itemTable: {
     width: '100%',
