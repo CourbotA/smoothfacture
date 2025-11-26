@@ -6,104 +6,104 @@
  */
 
 export function parseEmail(emailText) {
-  const lines = emailText.split('\n').map(l => l.trim()).filter(Boolean);
+  const lines = emailText
+    .split('\n')
+    .map(l => l.trim())
+    .filter(Boolean)
+    .filter(l => !/^[-_]{3,}$/.test(l)); // ignore separator lines
 
-  // Helper to insert a newline before any 5-digit zip code
-  function splitLineByZip(line) {
-    const zipRegex = /(\s)(\d{5})(\b)/;
-    return line.replace(zipRegex, '\n$2');
-  }
+  const { name: clientName, address: extractedAddress, remaining: initialRest } = extractClientInfo(lines);
+  let clientAddress = extractedAddress;
 
-  // Basic fields from the first 3 lines
-  const clientName = lines[0] || 'Client inconnu';
-  const rawClientAddress = lines[1] || 'Adresse inconnue';
-  const clientAddress = splitLineByZip(rawClientAddress);
-  const interventionPlaceLine = lines[2] || 'Intervention inconnue';
-
-  // Initialize variables
-  let interventionPlace = ''; 
-  const restLines = lines.slice(3); // Start processing from the fourth line
-
-  const descriptionEntries = []; // Array of { date, description }
+  let interventionPlace = '';
+  let currentDate = '';
+  const descriptionEntries = [];
   const items = [];
   const combustionLines = [];
-  let currentDate = ''; // To track the current intervention date
+  let restLines = [...initialRest];
+
+  // If the next line looks like an address continuation (city/zip), append it.
+  if (restLines.length) {
+    const potentialAddressLine = restLines[0];
+    const hasZipInAddress = /\b\d{5}\b/.test(clientAddress);
+    const looksLikeZipLine = /\b\d{5}\b/.test(potentialAddressLine);
+
+    if (
+      !extractDate(potentialAddressLine) &&
+      !/^intervention\b/i.test(potentialAddressLine) &&
+      (looksLikeZipLine || (!hasZipInAddress && /\d/.test(potentialAddressLine)))
+    ) {
+      clientAddress = `${clientAddress}\n${splitLineByZip(potentialAddressLine)}`;
+      restLines = restLines.slice(1);
+    }
+  }
+
+  // Capture the first explicit "Intervention ..." line if present
+  const interventionIdx = restLines.findIndex(l => /^intervention\b/i.test(l));
+  if (interventionIdx !== -1) {
+    const interventionLine = restLines.splice(interventionIdx, 1)[0];
+    const dateFromIntervention = extractDate(interventionLine);
+    if (dateFromIntervention) currentDate = dateFromIntervention;
+
+    const cleanedIntervention = interventionLine
+      .replace(/^intervention\b/i, '')
+      .replace(/\ble\b/i, '')
+      .replace(dateFromIntervention || '', '')
+      .trim();
+
+    const dateOnlyPlace = /^(\d{1,2}\s+){1,2}\d{4}$/.test(cleanedIntervention);
+    if (cleanedIntervention && !dateOnlyPlace) {
+      interventionPlace = cleanedIntervention;
+    }
+  }
+
+  if (!interventionPlace) {
+    interventionPlace = clientAddress.split('\n')[0] || 'Intervention';
+  }
+
   let capturingCombustion = false;
 
-  // Regex patterns
-  const dateRegex = /^(\d{2}\/\d{2}\/\d{4})$/i; // Matches dates like 28/11/2024
-  const itemPriceRegex = /([\d,\.]+)€$/i; // Matches price at the end of the line
-  const itemLineRegex = /^-?\s*(.+)$/; // Matches lines starting with '-' or not
-
   restLines.forEach(line => {
-    // If currently capturing combustion lines
-    if (capturingCombustion) {
-      // Continue capturing all lines as combustion data
-      combustionLines.push(line);
-      return; // Skip further checks for this line
+    const maybeDate = extractDate(line);
+    if (maybeDate && !capturingCombustion) {
+      currentDate = maybeDate;
+      return;
     }
 
-    // Check if the line starts the combustion block
-    if (!capturingCombustion && /^combustion$/i.test(line)) {
+    if (isCombustionStart(line)) {
       capturingCombustion = true;
+      combustionLines.push(line);
       return;
     }
 
-    // Check if the line specifies the intervention place
-    const interventionMatch = line.match(/^Intervention\s+(.*)$/i);
-    if (interventionMatch) {
-      interventionPlace = interventionMatch[1].trim();
-      return;
-    }
-
-    // Check if the line is a date
-    const dateMatch = line.match(dateRegex);
-    if (dateMatch) {
-      currentDate = dateMatch[1]; // e.g., '28/11/2024'
-      return;
-    }
-
-    // Check if the line is an item
-    const itemMatch = line.match(itemLineRegex);
-    if (itemMatch) {
-      const itemLine = itemMatch[1].trim();
-      const parsedItem = parseItemLine(itemLine, currentDate);
-      if (parsedItem) {
-        items.push(parsedItem);
-      } else {
-        // If not an item line, treat it as a description
-        if (currentDate) {
-          const existingEntry = descriptionEntries.find(entry => entry.date === currentDate);
-          if (existingEntry) {
-            existingEntry.description += `\n${itemLine}`;
-          } else {
-            descriptionEntries.push({
-              date: currentDate,
-              description: itemLine
-            });
-          }
-        } else {
-          // Description without a date
-          descriptionEntries.push({
-            date: '-',
-            description: line
-          });
-        }
+    if (capturingCombustion) {
+      const combustionExitDate = extractDate(line);
+      if (combustionExitDate) {
+        capturingCombustion = false;
+        currentDate = combustionExitDate;
+        return;
       }
+
+      const maybeCombustionItem = parseItemLine(line, currentDate);
+      if (maybeCombustionItem) {
+        capturingCombustion = false;
+        items.push(maybeCombustionItem);
+        return;
+      }
+
+      combustionLines.push(line);
       return;
     }
 
-    // If none of the above, treat it as a description line without a date
-    descriptionEntries.push({
-      date: '-',
-      description: line
-    });
+    const parsedItem = parseItemLine(line, currentDate);
+    if (parsedItem) {
+      items.push(parsedItem);
+      return;
+    }
+
+    addDescription(descriptionEntries, currentDate, line);
   });
 
-  // Build the Intervention header
-  const interventionHeader = `Intervention ${interventionPlaceLine}`;
-
-  // Return the structured data
   return {
     operationType: 'Entretien chaudière gaz',
 
@@ -120,8 +120,8 @@ export function parseEmail(emailText) {
     },
 
     intervention: {
-      address: interventionHeader, // e.g., "Intervention Locataire 17A Aubigny-en-artois"
-      descriptions: descriptionEntries // Array of { date, description }
+      address: `Intervention ${interventionPlace}`,
+      descriptions: descriptionEntries
     },
 
     items,
@@ -145,27 +145,138 @@ export function parseEmail(emailText) {
   };
 }
 
+function addDescription(descriptionEntries, date, line) {
+  const targetDate = date || '-';
+  const existingEntry = descriptionEntries.find(entry => entry.date === targetDate);
+  if (existingEntry) {
+    existingEntry.description += `\n${line}`;
+  } else {
+    descriptionEntries.push({
+      date: targetDate,
+      description: line
+    });
+  }
+}
+
+function isCombustionStart(line) {
+  return /combustion/i.test(line);
+}
+
+function extractClientInfo(lines) {
+  if (!lines.length) {
+    return { name: 'Client inconnu', address: 'Adresse inconnue', remaining: [] };
+  }
+
+  const [first, second, ...rest] = lines;
+  const firstHasDigit = /\d/.test(first);
+  const secondHasDigit = /\d/.test(second || '');
+
+  // name on first line
+  if (!firstHasDigit) {
+    return {
+      name: first,
+      address: splitLineByZip(second || 'Adresse inconnue'),
+      remaining: rest
+    };
+  }
+
+  // mixed name + address on first line
+  const digitIndex = first.search(/\d/);
+  if (digitIndex > 0) {
+    return {
+      name: first.slice(0, digitIndex).trim() || 'Client inconnu',
+      address: splitLineByZip(first.slice(digitIndex).trim() || 'Adresse inconnue'),
+      remaining: [second, ...rest].filter(Boolean)
+    };
+  }
+
+  // address then name
+  if (!secondHasDigit && second) {
+    return {
+      name: second,
+      address: splitLineByZip(first),
+      remaining: rest
+    };
+  }
+
+  return {
+    name: 'Client inconnu',
+    address: splitLineByZip(first),
+    remaining: [second, ...rest].filter(Boolean)
+  };
+}
+
+function extractDate(line) {
+  const numericDate = line.match(/(\d{1,2})[\/\-\s](\d{1,2})[\/\-\s](\d{4})/);
+  if (numericDate) {
+    const day = numericDate[1].padStart(2, '0');
+    const month = numericDate[2].padStart(2, '0');
+    const year = numericDate[3];
+    return `${day}/${month}/${year}`;
+  }
+
+  const monthMatch = line.match(/(\d{1,2})\s+([A-Za-zéèêëôûùïîäâç]+)\s+(\d{4})/i);
+  if (monthMatch) {
+    const day = monthMatch[1].padStart(2, '0');
+    const month = monthToNumber(monthMatch[2]);
+    const year = monthMatch[3];
+    if (month) return `${day}/${month}/${year}`;
+  }
+
+  return null;
+}
+
+function monthToNumber(monthLabel) {
+  const normalized = monthLabel
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
+
+  const mapping = {
+    janvier: '01',
+    fevrier: '02',
+    février: '02',
+    mars: '03',
+    avril: '04',
+    mai: '05',
+    juin: '06',
+    juillet: '07',
+    aout: '08',
+    août: '08',
+    septembre: '09',
+    octobre: '10',
+    novembre: '11',
+    decembre: '12',
+    décembre: '12'
+  };
+
+  return mapping[normalized];
+}
+
 /**
  * Parses an item line and assigns the current date.
- *
- * @param {string} line - The item line to parse.
- * @param {string} currentDate - The current intervention date.
- * @returns {object|null} - Parsed item object or null if parsing fails.
  */
-function parseItemLine(line, currentDate) {
-  // Pattern 4: Description followed by quantity*unitPrice€ total€
-  const pattern4 = /^(.+?)\s+(\d+)(?:\s*(\w+))?\*([\d,\.]+)€\s+([\d,\.]+)€$/i;
-  const match4 = line.match(pattern4);
-  if (match4) {
-    const description = match4[1].trim();
-    const quantity = parseFloat(match4[2].replace(',', '.'));
-    const unit = match4[3] ? match4[3].toLowerCase() : 'pce'; // Default to 'pce' if unit is missing
-    const unitPrice = parseFloat(match4[4].replace(',', '.'));
-    const total = parseFloat(match4[5].replace(',', '.'));
+function parseItemLine(rawLine, currentDate) {
+  const line = rawLine.replace(/\s+€/g, ' €').replace(/\s{2,}/g, ' ').trim();
+  if (!line.includes('€')) return null;
+
+  const numberPattern = '(\\d+(?:[.,]\\d+)?)';
+
+  const qtyPricePattern = new RegExp(
+    `^(.+?)\\s+${numberPattern}\\s*(h|pce|u|unite|unité)?\\s*\\*\\s*${numberPattern}\\s*€?\\s+${numberPattern}\\s*€$`,
+    'i'
+  );
+  const matchQty = line.match(qtyPricePattern);
+  if (matchQty) {
+    const description = matchQty[1].trim();
+    const quantity = toNumber(matchQty[2]);
+    const unit = matchQty[3] ? matchQty[3].toLowerCase() : 'pce';
+    const unitPrice = toNumber(matchQty[4]);
+    const total = toNumber(matchQty[5]);
 
     return {
       description,
-      date: currentDate || '-', // Assign currentDate or '-' if not available
+      date: currentDate || '-',
       quantity: formatQty(quantity),
       unit,
       unitPrice: formatEuro(unitPrice),
@@ -173,80 +284,63 @@ function parseItemLine(line, currentDate) {
     };
   }
 
-  // Pattern 1: Description followed by quantity, unit, '*', unit price, and total
-  const pattern1 = /^(.+?)\s+(\d+[.,]?\d*)\s*(h|pce)\s*\*\s*([\d,\.]+)€\s+([\d,\.]+)€$/i;
-  const match1 = line.match(pattern1);
-  if (match1) {
-    const description = match1[1].trim();
-    const quantity = parseFloat(match1[2].replace(',', '.'));
-    const unit = match1[3].toLowerCase();
-    const unitPrice = parseFloat(match1[4].replace(',', '.'));
-    const total = parseFloat(match1[5].replace(',', '.'));
+  const codePricePattern = new RegExp(`^(.+?)\\s+[\\d\\s\\/]+\\s+${numberPattern}\\s*€$`, 'i');
+  const matchCode = line.match(codePricePattern);
+  if (matchCode) {
+    const description = matchCode[1].trim();
+    const price = toNumber(matchCode[2]);
 
     return {
       description,
-      date: currentDate || '-', // Assign currentDate or '-' if not available
-      quantity: formatQty(quantity),
-      unit,
-      unitPrice: formatEuro(unitPrice),
-      total: formatEuro(total)
+      date: currentDate || '-',
+      quantity: '1,00',
+      unit: 'pce',
+      unitPrice: formatEuro(price),
+      total: formatEuro(price)
     };
   }
 
-  // Pattern 2: Description followed by unit price only (no quantity/unit)
-  const pattern2 = /^(.+?)\s+([\d,\.]+)€$/i;
-  const match2 = line.match(pattern2);
-  if (match2) {
-    const description = match2[1].trim();
-    const unitPrice = parseFloat(match2[2].replace(',', '.'));
+  const trailingPricePattern = new RegExp(`^(.+?)\\s+${numberPattern}\\s*€$`, 'i');
+  const matchTrailing = line.match(trailingPricePattern);
+  if (matchTrailing) {
+    const description = matchTrailing[1].trim();
+    const price = toNumber(matchTrailing[2]);
 
     return {
       description,
-      date: currentDate || '-', // Assign currentDate or '-' if not available
-      quantity: '1,00', // Default quantity
-      unit: 'pce',      // Default unit
-      unitPrice: formatEuro(unitPrice),
-      total: formatEuro(unitPrice) // Assuming quantity = 1
+      date: currentDate || '-',
+      quantity: '1,00',
+      unit: 'pce',
+      unitPrice: formatEuro(price),
+      total: formatEuro(price)
     };
   }
 
-  // Pattern 3: Description followed by code and price (e.g., "remplacement robinet WC 12/17   4,50€")
-  const pattern3 = /^(.+?)\s+[\d\/]+\s+([\d,\.]+)€$/i;
-  const match3 = line.match(pattern3);
-  if (match3) {
-    const description = match3[1].trim();
-    const unitPrice = parseFloat(match3[2].replace(',', '.'));
-
-    return {
-      description,
-      date: currentDate || '-', // Assign currentDate or '-' if not available
-      quantity: '1,00', // Default quantity
-      unit: 'pce',      // Default unit
-      unitPrice: formatEuro(unitPrice),
-      total: formatEuro(unitPrice) // Assuming quantity = 1
-    };
-  }
-
-  // If no patterns match, return null
   return null;
 }
 
 /**
+ * Inserts a newline before any 5-digit zip code.
+ */
+function splitLineByZip(line) {
+  const zipRegex = /(\s)(\d{5})(\b)/;
+  return line.replace(zipRegex, '\n$2');
+}
+
+function toNumber(value) {
+  return parseFloat(String(value).replace(',', '.'));
+}
+
+/**
  * Formats a number to "xx,xx €".
- *
- * @param {number} num - The number to format.
- * @returns {string} - Formatted string.
  */
 function formatEuro(num) {
-  return num.toFixed(2).replace('.', ',') + ' €';
+  return `${Number(num || 0).toFixed(2).replace('.', ',')} €`;
 }
 
 /**
  * Formats a quantity to "x,xx".
- *
- * @param {number} num - The quantity to format.
- * @returns {string} - Formatted string.
  */
 function formatQty(num) {
-  return num.toFixed(2).replace('.', ',');
+  return Number(num || 0).toFixed(2).replace('.', ',');
 }
