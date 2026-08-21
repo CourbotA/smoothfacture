@@ -262,7 +262,7 @@ function looksLikeInvoiceHeader(chunk) {
 
   const [firstLine] = chunk;
   const hasDate = chunk.some(line => Boolean(extractDate(line)));
-  const hasAddressLine = chunk.slice(1, 4).some(line => /\d/.test(line));
+  const hasAddressLine = chunk.slice(1, 4).some(looksLikeAddressLine);
   return hasDate && !/\d/.test(firstLine) && hasAddressLine;
 }
 
@@ -287,8 +287,12 @@ function isInvoiceStart(lines, index) {
   }
 
   const lookAhead = lines.slice(index, index + 6);
-  const hasAddressLine = lookAhead.slice(1, 4).some(line => /\d/.test(line));
+  const hasAddressLine = lookAhead.slice(1, 4).some(looksLikeAddressLine);
   return hasAddressLine && lookAhead.some(line => Boolean(extractDate(line)));
+}
+
+function looksLikeAddressLine(line) {
+  return /\b\d{5}\b/.test(line) || looksLikeStreetAddress(line);
 }
 
 function addDescription(descriptionEntries, date, line) {

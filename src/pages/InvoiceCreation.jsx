@@ -135,45 +135,67 @@ function InvoiceCreation() {
     <>
       <section className="hero" id="saisie">
         <div className="hero-copy">
-          <span className="eyebrow"><Icon name="sparkles" size={16} /> Simple, rapide, professionnel</span>
-          <h1>Vos factures,<br /><em>sans prise de tête.</em></h1>
-          <p>Écrivez simplement les informations du chantier. Smoothfacture les organise et prépare un document propre pour vous.</p>
-          <div className="trust-row"><span><Icon name="check" size={15} /> Aucun formulaire compliqué</span><span><Icon name="check" size={15} /> PDF prêt à envoyer</span></div>
+          <span className="eyebrow"><Icon name="sparkles" size={17} /> Votre assistant de facturation</span>
+          <h1>Une facture prête<br /><em>en 2 minutes.</em></h1>
+          <p>Écrivez les informations du chantier avec vos mots. Facture Facile s’occupe de les mettre en ordre.</p>
+
+          <ol className="journey-list" aria-label="Les trois étapes">
+            <li><span>1</span><div><strong>Vous décrivez</strong><small>Le client, les travaux et les prix</small></div></li>
+            <li><span>2</span><div><strong>Vous vérifiez</strong><small>Tout reste modifiable</small></div></li>
+            <li><span>3</span><div><strong>Vous téléchargez</strong><small>Un PDF propre, prêt à envoyer</small></div></li>
+          </ol>
+
+          <div className="privacy-callout"><Icon name="check" size={18} /><span><strong>Simple et confidentiel</strong>Vos informations restent sur cet appareil.</span></div>
         </div>
 
-        <div className="composer-card">
-          <div className="composer-heading">
-            <span className="step-number">1</span>
-            <div><h2>Que souhaitez-vous créer&nbsp;?</h2><p>Choisissez votre document.</p></div>
+        <form className="composer-card" onSubmit={event => { event.preventDefault(); handleParse(); }} noValidate>
+          <div className="composer-intro">
+            <span>CRÉER UN DOCUMENT</span>
+            <h2>Commençons.</h2>
+            <p>Deux petites étapes, puis vous pourrez tout vérifier.</p>
           </div>
 
-          <div className="document-switch" role="radiogroup" aria-label="Type de document">
-            <button className={documentType === 'facture' ? 'active' : ''} onClick={() => selectDocumentType('facture')} role="radio" aria-checked={documentType === 'facture'}>
-              <Icon name="file" /><span><strong>Une facture</strong><small>Pour un travail réalisé</small></span><i><Icon name="check" size={14} /></i>
-            </button>
-            <button className={documentType === 'devis' ? 'active' : ''} onClick={() => selectDocumentType('devis')} role="radio" aria-checked={documentType === 'devis'}>
-              <Icon name="quote" /><span><strong>Un devis</strong><small>Pour proposer un prix</small></span><i><Icon name="check" size={14} /></i>
-            </button>
-          </div>
+          <fieldset className="document-fieldset">
+            <legend><span className="step-number">1</span><span><strong>Que voulez-vous préparer&nbsp;?</strong><small>Choisissez une réponse</small></span></legend>
+            <div className="document-switch">
+              <label className={documentType === 'facture' ? 'active' : ''}>
+                <input type="radio" name="document-type" value="facture" checked={documentType === 'facture'} onChange={() => selectDocumentType('facture')} />
+                <span className="document-icon"><Icon name="file" /></span>
+                <span className="document-copy"><strong>Une facture</strong><small>Le travail est terminé</small></span>
+                <span className="radio-mark"><Icon name="check" size={14} /></span>
+              </label>
+              <label className={documentType === 'devis' ? 'active' : ''}>
+                <input type="radio" name="document-type" value="devis" checked={documentType === 'devis'} onChange={() => selectDocumentType('devis')} />
+                <span className="document-icon"><Icon name="quote" /></span>
+                <span className="document-copy"><strong>Un devis</strong><small>Je propose un prix</small></span>
+                <span className="radio-mark"><Icon name="check" size={14} /></span>
+              </label>
+            </div>
+          </fieldset>
 
           <div className="composer-heading second-step">
             <span className="step-number">2</span>
-            <div><h2>Décrivez le chantier</h2><p>Écrivez comme dans un message. L’ordre n’a pas d’importance.</p></div>
+            <div><label htmlFor="job-description">Décrivez le chantier</label><p id="job-description-help">Écrivez comme vous parleriez. L’ordre n’a pas d’importance.</p></div>
+          </div>
+
+          <div className="recognized-hints" aria-label="Informations à indiquer si possible">
+            <span><Icon name="user" size={16} /> Client</span><span><Icon name="pin" size={16} /> Adresse</span><span><Icon name="tools" size={16} /> Travaux</span><span><Icon name="euro" size={16} /> Prix</span>
           </div>
 
           <div className={`textarea-wrap ${errorMessage ? 'has-error' : ''}`}>
-            <textarea value={rawText} onChange={event => { setRawText(event.target.value); setErrorMessage(''); }} placeholder={EXAMPLE_TEXT} aria-label="Informations de la facture ou du devis" rows={11} />
-            <span className="textarea-hint"><Icon name="info" size={14} /> Vous pouvez copier-coller un SMS, un e-mail ou vos notes.</span>
+            <textarea id="job-description" value={rawText} onChange={event => { setRawText(event.target.value); setErrorMessage(''); }} placeholder="Collez un SMS, un e-mail ou écrivez vos notes ici…" aria-describedby={`job-description-help${errorMessage ? ' job-description-error' : ''}`} aria-invalid={Boolean(errorMessage)} rows={9} />
           </div>
 
-          <div className="recognized-hints" aria-label="Informations utiles">
-            <span><Icon name="user" size={14} /> Client</span><span><Icon name="pin" size={14} /> Adresse</span><span><Icon name="tools" size={14} /> Travaux</span><span><Icon name="euro" size={14} /> Prix</span>
+          <div className="textarea-actions">
+            <button type="button" className="example-button" onClick={() => { setRawText(EXAMPLE_TEXT); setErrorMessage(''); }}><Icon name="file" size={16} /> Remplir avec un exemple</button>
+            <span><Icon name="check" size={15} /> Vous pourrez tout corriger ensuite</span>
           </div>
-          {errorMessage && <div className="form-error" role="alert">{errorMessage}</div>}
 
-          <button className="primary-action" onClick={handleParse} disabled={!rawText.trim()}><Icon name="sparkles" /> Créer {documentType === 'facture' ? 'ma facture' : 'mon devis'} <Icon name="arrow" /></button>
-          <p className="privacy-note">Vos informations restent sur cet appareil.</p>
-        </div>
+          {errorMessage && <div className="form-error" id="job-description-error" role="alert"><Icon name="info" size={17} /> {errorMessage}</div>}
+
+          <button className="primary-action" type="submit"><Icon name="sparkles" /> Préparer {documentType === 'facture' ? 'ma facture' : 'mon devis'} <Icon name="arrow" /></button>
+          <p className="privacy-note">Aucun envoi automatique. Vous gardez le contrôle.</p>
+        </form>
       </section>
 
       {activeInvoice && (

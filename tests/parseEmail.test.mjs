@@ -28,3 +28,23 @@ Main d'oeuvre déplacement 105€`;
   });
   assert.equal(invoice.items[1].total, '105,00 €');
 });
+
+test('does not split work lines into a second invoice when a later date follows a price', () => {
+  const input = `Monsieur Madame Thierry hornoy 7 rue de la Barre 62580 Neuville-Saint-Vaast
+
+Intervention 19 mai 2026
+Avion 57 rue du 14-Juillet
+Pose grille ventilation
+
+percement mur
+Fixation grille
+2 grillesavec moustiquaire 22€80
+20 juillet 2026
+Main d'oeuvre déplacement 105€`;
+
+  const invoices = parseEmails(input);
+
+  assert.equal(invoices.length, 1);
+  assert.equal(invoices[0].items.length, 2);
+  assert.deepEqual(invoices[0].items.map(item => item.total), ['22,80 €', '105,00 €']);
+});
