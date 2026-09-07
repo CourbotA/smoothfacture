@@ -6,6 +6,7 @@ This service owns durable business data that must not live only in a browser or 
 - reusable customers;
 - invoice/devis drafts;
 - final document numbers;
+- canonical tax data and server-recalculated totals;
 - append-only invoice lifecycle events.
 
 ## Important numbering rule
@@ -21,6 +22,20 @@ POST /api/invoices/:id/finalize
 Finalization runs inside a SQLite transaction. Calling it again for an already-finalized document returns the existing number instead of consuming another one. Finalized document contents cannot be updated through the draft endpoint.
 
 Invoice and devis sequences are independent per company.
+
+## VAT / BTP P0 model
+
+The canonical invoice supports:
+
+- franchise en base — article 293 B;
+- standard French VAT rates used by the product: 20 %, 10 % and 5.5 %;
+- mixed rates across invoice lines;
+- BTP subcontracting reverse charge (`reverse_charge_btp` / `Autoliquidation`);
+- explicit reduced-rate certification before finalization.
+
+Tax totals sent by the phone are **not trusted**. The server runs `recalculateInvoiceTax()` before persistence/finalization and stores the recalculated HT, TVA and TTC totals.
+
+Reduced 10 % / 5.5 % rates are user-selected and require confirmation; the parser does not infer legal eligibility from free-form work descriptions.
 
 ## Run locally
 
@@ -59,6 +74,13 @@ EXPO_PUBLIC_SMOOTHFACTURE_API_URL=http://192.168.1.20:35457
 
 The mobile API client lives in `mobile/src/services/smoothfactureApi.js`.
 
+The React Native flow now uses it to:
+
+1. sync the company profile;
+2. create/update an unnumbered draft;
+3. finalize the verified document;
+4. display the server-assigned immutable number.
+
 ## API
 
 ### Health
@@ -82,7 +104,11 @@ Body for create/update:
   "profile": {
     "legalName": "Entreprise Exemple",
     "siren": "123456789",
-    "siret": "12345678900010"
+    "siret": "12345678900010",
+    "tax": {
+      "vatRegime": "standard",
+      "defaultVatRate": 20
+    }
   }
 }
 ```
@@ -103,11 +129,11 @@ Create body:
 ```json
 {
   "companyId": "...",
-  "invoice": { "schemaVersion": 1 }
+  "invoice": { "schemaVersion": 2 }
 }
 ```
 
-The full canonical invoice produced by `src/domain/invoiceModel.js` is stored as JSON, with searchable/critical metadata duplicated into relational columns.
+The canonical invoice produced by `src/domain/invoiceModel.js` is stored as JSON, with searchable/critical metadata duplicated into relational columns.
 
 ### Finalize
 
@@ -121,7 +147,7 @@ POST /api/invoices/:id/finalize
 }
 ```
 
-Before allocating a number, the server refuses finalization when core business facts are missing, including seller identity, customer address, professional-customer SIREN, operation category, lines, or line prices.
+Before allocating a number, the server runs the same shared readiness validation as the mobile app. It refuses finalization when required identity/customer/line/tax data is incomplete, including missing professional-customer SIREN or unconfirmed reduced-rate VAT.
 
 ### Audit events
 
@@ -137,8 +163,8 @@ Current events:
 
 This event stream is intentionally shaped so later PA/Factur-X lifecycle events can be appended without changing invoice numbering semantics.
 
-## Not production-ready yet
+## Still not production-ready
 
 This P0 service deliberately does **not** include authentication/authorization yet. Do not expose it directly to the public internet. The next backend security slice should add user accounts/sessions and enforce company ownership on every request.
 
-Factur-X, Plateforme Agréée transmission, e-reporting, native PDF generation, backups and production PostgreSQL deployment are also outside this slice.
+Factur-X, Plateforme Agréée transmission, e-reporting, native PDF generation, backups and production PostgreSQL deployment remain outside P0.
