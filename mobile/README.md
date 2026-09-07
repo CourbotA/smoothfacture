@@ -2,19 +2,23 @@
 
 React Native/Expo client for SmoothFacture.
 
-## What this slice includes
+## P0 flow implemented
 
 - Expo SDK 57 / React Native 0.86 mobile shell.
 - Free-form invoice/devis input.
 - Native French speech recognition through `expo-speech-recognition`.
 - Shared deterministic interpreter from the existing application.
-- Canonical P0 invoice model shared with the web codebase.
+- Canonical invoice model shared with the backend/web codebase.
 - Company profile with SIREN/SIRET and local persistence.
+- Optional server synchronization through `EXPO_PUBLIC_SMOOTHFACTURE_API_URL`.
 - Customer type (particulier / entreprise), customer SIREN and regulatory operation category.
-- Electronic-invoice readiness validation before future Factur-X / PA transmission.
-- Optional client for the P0 persistence API under `src/services/smoothfactureApi.js`.
+- Draft save/update without consuming a final number.
+- Server finalization with an immutable assigned number.
+- Electronic-invoice readiness validation before finalization.
+- VAT P0 workflow: franchise 293 B, 20 %, 10 %, 5.5 %, mixed line rates and BTP autoliquidation.
+- Explicit confirmation before a reduced 10 % / 5.5 % rate can be finalized.
 
-The existing Vite web application remains untouched while the native migration is validated.
+The existing Vite web application remains available while the native migration continues.
 
 ## Run
 
@@ -34,32 +38,61 @@ npm run android
 npm run ios
 ```
 
-## Connect the persistent backend
+## Connect the backend
 
-Start the backend from `../server` and set an API URL reachable from the phone:
+Start the API first:
+
+```bash
+cd server
+npm install
+npm test
+npm start
+```
+
+Then configure an address reachable from the device. For a physical phone, do not use `localhost` unless the API is running on the phone itself.
+
+Example:
 
 ```text
 EXPO_PUBLIC_SMOOTHFACTURE_API_URL=http://192.168.1.20:35457
 ```
 
-The mobile API client supports:
+With the API configured, the mobile flow is:
 
-- synchronizing the company profile;
-- creating/updating invoice drafts;
-- finalizing a saved draft and receiving its server-issued number;
-- listing persisted invoices.
+```text
+Dictate / type
+→ interpret
+→ verify client + tax
+→ save draft
+→ finalize
+→ server assigns number
+→ finalized content becomes read-only
+```
 
-If `EXPO_PUBLIC_SMOOTHFACTURE_API_URL` is not set, these network operations stay disabled rather than silently sending business data somewhere.
+If the API URL is absent, interpretation/review and the local company profile still work, but Save draft / Finalize are disabled.
+
+## VAT behavior
+
+The company profile chooses either:
+
+- `Franchise 293 B` — no collected VAT, article 293 B mention;
+- `Assujetti TVA` — default line rate of 20 %, 10 % or 5.5 %.
+
+For VAT-registered companies, the review screen can change each line independently. Reduced rates are never inferred automatically from dictated text; selecting 10 % or 5.5 % requires explicit confirmation that the conditions are met.
+
+For BTP subcontracting, `Autoliquidation BTP` is available for a professional customer. The invoice remains HT and the tax breakdown uses the `Autoliquidation` treatment.
+
+The backend recalculates all tax totals before storing/finalizing the document.
 
 ## Validation from the repository root
 
-The shared domain layer is covered by Node tests:
+Shared interpreter/domain tests:
 
 ```bash
 npm test
 ```
 
-The persistence/numbering backend has its own tests:
+Backend tests:
 
 ```bash
 cd server
@@ -69,11 +102,11 @@ npm test
 
 ## Still intentionally out of scope
 
-- Wiring the persistence actions into every mobile screen/action.
+- Authentication / authorization.
 - Mobile PDF generation / exact PDF preview.
 - Factur-X generation.
-- Plateforme Agréée API integration.
-- Authentication/authorization and company ownership enforcement.
-- Full multi-rate VAT editor/calculation engine.
+- Plateforme Agréée integration.
+- E-reporting.
+- Production database/backups/deployment.
 
-The server now owns durable company/customer/invoice storage, final numbering and invoice lifecycle events. Future output and PA integrations should consume the canonical model in `src/domain/` instead of rebuilding invoice data.
+Those next layers should consume the canonical invoice persisted by the server rather than recreate business data inside the UI.
