@@ -210,7 +210,8 @@ function renderInvoicePdf(doc, invoiceData) {
   let currentY = Math.max(senderY, clientY) + 40;
 
   doc.setFontSize(11);
-  const wrappedIntervention = doc.splitTextToSize(intervention.address || '', 300);
+  const interventionText = intervention.address ? `Intervention ${intervention.address}` : '';
+  const wrappedIntervention = doc.splitTextToSize(interventionText, 300);
   wrappedIntervention.forEach((line, index) => {
     doc.text(line, leftMargin, currentY + index * 14);
   });
@@ -244,9 +245,9 @@ function renderInvoicePdf(doc, invoiceData) {
       item?.date && item.date !== '-' ? item.date : '-',
       item?.quantity || '1,00',
       item?.unit || 'pce',
-      item?.unitPrice || formatEuro(0),
+      item?.unitPrice ?? formatEuro(0),
       'Non applicable',
-      item?.total || formatEuro(0)
+      item?.total ?? formatEuro(0)
     ]),
     styles: {
       fontSize: 11,
@@ -376,7 +377,7 @@ function parseEuroValue(value) {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
-function formatEuro(value) {
+export function formatEuro(value) {
   return `${Number(value || 0).toFixed(2).replace('.', ',')} \u20AC`;
 }
 
