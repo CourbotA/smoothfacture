@@ -1,3 +1,9 @@
+import {
+  applyTaxDefaultsToLines,
+  createInvoiceTaxSettings,
+  recalculateInvoiceTax
+} from './taxModel.js';
+
 export const CUSTOMER_TYPES = Object.freeze({
   INDIVIDUAL: 'individual',
   COMPANY: 'company'
@@ -18,10 +24,14 @@ export const DOCUMENT_TYPES = Object.freeze({
 export function createCanonicalInvoice({ legacyInvoice = {}, companyProfile = null } = {}) {
   const seller = companyProfile ? companyToParty(companyProfile) : legacySellerToParty(legacyInvoice);
   const buyer = legacyBuyerToParty(legacyInvoice.client || {});
-  const lines = (legacyInvoice.items || []).map((item, index) => canonicalizeLine(item, index));
+  const tax = createInvoiceTaxSettings(companyProfile || {});
+  const lines = applyTaxDefaultsToLines(
+    (legacyInvoice.items || []).map((item, index) => canonicalizeLine(item, index)),
+    tax
+  );
 
-  return {
-    schemaVersion: 1,
+  return recalculateInvoiceTax({
+    schemaVersion: 2,
     id: legacyInvoice.id || null,
     documentType: legacyInvoice.documentType || DOCUMENT_TYPES.INVOICE,
     number: legacyInvoice.invoiceNumber || null,
@@ -36,7 +46,7 @@ export function createCanonicalInvoice({ legacyInvoice = {}, companyProfile = nu
       category: legacyInvoice.operationType || 'Travaux'
     },
     lines,
-    taxBreakdown: buildTaxBreakdown(lines, companyProfile),
+    tax,
     payment: {
       iban: companyProfile?.payment?.iban || legacyInvoice.payment?.iban || '',
       termsDays: companyProfile?.payment?.termsDays ?? null,
@@ -58,7 +68,7 @@ export function createCanonicalInvoice({ legacyInvoice = {}, companyProfile = nu
     source: {
       interpreterEngine: legacyInvoice.interpretation?.engine || null
     }
-  };
+  });
 }
 
 export function companyToParty(company) {
@@ -126,7 +136,7 @@ function canonicalizeLine(item, index) {
   const totalExcludingTax = Number.isFinite(explicitTotal)
     ? explicitTotal
     : (Number.isFinite(unitPrice) ? roundMoney(unitPrice * quantity) : null);
-  const vatRate = Number.isFinite(Number(item.vatRate)) ? Number(item.vatRate) : null;
+  const parsedVatRate = item.vatRate == null || item.vatRate === '' ? null : Number(String(item.vatRate).replace(',', '.'));
 
   return {
     id: item.id || `line-${index + 1}`,
@@ -135,26 +145,11 @@ function canonicalizeLine(item, index) {
     unit: item.unit || 'pce',
     unitPriceExcludingTax: Number.isFinite(unitPrice) ? unitPrice : null,
     totalExcludingTax,
-    vatRate,
+    vatRate: Number.isFinite(parsedVatRate) ? parsedVatRate : null,
     hasExplicitPrice: Boolean(item.hasExplicitPrice),
     includedWithoutPrice: Boolean(item.includedWithoutPrice),
     sourceText: item.sourceText || ''
   };
-}
-
-function buildTaxBreakdown(lines, companyProfile) {
-  const configuredRate = Number(companyProfile?.tax?.defaultVatRate);
-  const isExempt = companyProfile?.tax?.vatRegime === 'exempt_293b';
-  const rate = isExempt ? 0 : (Number.isFinite(configuredRate) ? configuredRate : null);
-  const taxableBase = roundMoney(lines.reduce((sum, line) => sum + (line.totalExcludingTax || 0), 0));
-  const taxAmount = rate == null ? null : roundMoney(taxableBase * rate / 100);
-
-  return [{
-    vatRate: rate,
-    taxableBase,
-    taxAmount,
-    exemptionReason: isExempt ? companyProfile?.tax?.exemptionReason || '' : ''
-  }];
 }
 
 function inferRegulatoryOperationCategory(lines) {
