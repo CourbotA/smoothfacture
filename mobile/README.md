@@ -6,7 +6,8 @@ React Native/Expo client for SmoothFacture.
 
 - Expo SDK 57 / React Native 0.86 mobile shell.
 - Free-form invoice/devis input.
-- Native French speech recognition through `expo-speech-recognition`.
+- Native French speech recognition through `expo-speech-recognition` when the native module is available.
+- Expo Go compatibility: the app no longer crashes when speech recognition is absent; typing/paste, parsing, VAT and backend flows remain usable.
 - Shared deterministic interpreter from the existing application.
 - Canonical invoice model shared with the backend/web codebase.
 - Company profile with SIREN/SIRET and local persistence.
@@ -20,17 +21,38 @@ React Native/Expo client for SmoothFacture.
 
 The existing Vite web application remains available while the native migration continues.
 
-## Run
+## Run on your phone with Expo Go
 
 Expo SDK 57 requires Node.js 22.13 or newer.
+
+The normal development command is:
 
 ```bash
 cd mobile
 npm install
-npm start
+npx expo start
 ```
 
-Speech recognition uses a native config plugin, so use a development build for microphone dictation:
+Scan the QR code with Expo Go. The entire text/paste → interpret → review → save/finalize flow works in Expo Go. Dictation is the only feature that requires a native development build because Expo Go does not ship the `ExpoSpeechRecognition` native module.
+
+If `expo-dev-client` was installed locally while experimenting with EAS, remove it once if you want `npx expo start` to target Expo Go by default:
+
+```bash
+npm uninstall expo-dev-client
+npx expo start --clear
+```
+
+After that, everyday development is simply:
+
+```bash
+npx expo start
+```
+
+## Native dictation
+
+The `expo-speech-recognition` package remains installed and configured so a development/store build can include native dictation. When that native module is present, the same app automatically uses it; no alternate code path or separate app is needed.
+
+For native builds:
 
 ```bash
 npm run android
