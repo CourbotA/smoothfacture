@@ -35,7 +35,9 @@ The canonical invoice supports:
 
 Tax totals sent by the phone are **not trusted**. The server runs `recalculateInvoiceTax()` before persistence/finalization and stores the recalculated HT, TVA and TTC totals.
 
-Reduced 10 % / 5.5 % rates are user-selected and require confirmation; the parser does not infer legal eligibility from free-form work descriptions.
+Reduced 10 % / 5.5 % rates are user-selected and require confirmation; the parser does not infer legal eligibility from free-form work descriptions. This is deliberate because the applicable reduced rate depends on factual conditions of the property/work rather than wording alone.
+
+Current implementation assumptions are based on the 2026 French invoicing/VAT rules: standard 20 %, reduced renovation rates 10 % / 5.5 %, article 293 B exemption, and the BTP subcontracting reverse-charge mechanism. These rules should remain covered by compliance tests and reviewed when legal requirements change.
 
 ## Run locally
 
