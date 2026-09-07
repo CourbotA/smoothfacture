@@ -1,0 +1,354 @@
+import { randomUUID } from 'node:crypto';
+
+export class RepositoryError extends Error {
+  constructor(message, statusCode = 400, code = 'repository_error') {
+    super(message);
+    this.name = 'RepositoryError';
+    this.statusCode = statusCode;
+    this.code = code;
+  }
+}
+
+export class InvoiceRepository {
+  constructor(db) {
+    this.db = db;
+    this.finalizeTransaction = db.transaction((invoiceId, companyId) => this.#finalize(invoiceId, companyId));
+  }
+
+  createCompany(profile) {
+    const normalized = normalizeCompany(profile);
+    const existing = normalized.siren
+      ? this.db.prepare('SELECT id FROM companies WHERE siren = ?').get(normalized.siren)
+      : null;
+
+    if (existing) return this.updateCompany(existing.id, normalized);
+
+    const id = randomUUID();
+    const now = timestamp();
+    this.db.prepare(`
+      INSERT INTO companies (id, legal_name, siren, siret, profile_json, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(id, normalized.legalName, normalized.siren, normalized.siret, json(normalized), now, now);
+    return { id, ...normalized, createdAt: now, updatedAt: now };
+  }
+
+  updateCompany(id, profile) {
+    const current = this.db.prepare('SELECT * FROM companies WHERE id = ?').get(id);
+    if (!current) throw new RepositoryError('Entreprise introuvable.', 404, 'company_not_found');
+    const normalized = normalizeCompany(profile);
+    const now = timestamp();
+    this.db.prepare(`
+      UPDATE companies
+      SET legal_name = ?, siren = ?, siret = ?, profile_json = ?, updated_at = ?
+      WHERE id = ?
+    `).run(normalized.legalName, normalized.siren, normalized.siret, json(normalized), now, id);
+    return { id, ...normalized, createdAt: current.created_at, updatedAt: now };
+  }
+
+  getCompany(id) {
+    const row = this.db.prepare('SELECT * FROM companies WHERE id = ?').get(id);
+    return row ? hydrateCompany(row) : null;
+  }
+
+  createDraft(companyId, invoice) {
+    this.#requireCompany(companyId);
+    const normalized = normalizeInvoice(invoice);
+    const id = randomUUID();
+    const now = timestamp();
+    const customerId = this.#upsertCustomer(companyId, normalized.buyer);
+    const totals = calculateTotals(normalized);
+
+    this.db.prepare(`
+      INSERT INTO invoices (
+        id, company_id, customer_id, document_type, status, invoice_number,
+        issue_date, due_date, currency, total_excluding_tax, total_tax,
+        total_including_tax, canonical_json, created_at, updated_at, finalized_at
+      ) VALUES (?, ?, ?, ?, 'draft', NULL, ?, ?, 'EUR', ?, ?, ?, ?, ?, ?, NULL)
+    `).run(
+      id, companyId, customerId, normalized.documentType,
+      normalized.issueDate || null, normalized.dueDate || null,
+      totals.excludingTax, totals.tax, totals.includingTax,
+      json({ ...normalized, id, number: null }), now, now
+    );
+
+    this.#appendEvent(id, 'draft_created', { companyId });
+    return this.getInvoice(id, companyId);
+  }
+
+  updateDraft(invoiceId, companyId, invoice) {
+    const current = this.#requireInvoice(invoiceId, companyId);
+    if (current.status !== 'draft') {
+      throw new RepositoryError('Une facture finalisée ne peut plus être modifiée.', 409, 'invoice_immutable');
+    }
+
+    const normalized = normalizeInvoice(invoice);
+    const customerId = this.#upsertCustomer(companyId, normalized.buyer);
+    const totals = calculateTotals(normalized);
+    const now = timestamp();
+
+    this.db.prepare(`
+      UPDATE invoices
+      SET customer_id = ?, document_type = ?, issue_date = ?, due_date = ?,
+          total_excluding_tax = ?, total_tax = ?, total_including_tax = ?,
+          canonical_json = ?, updated_at = ?
+      WHERE id = ? AND company_id = ?
+    `).run(
+      customerId, normalized.documentType, normalized.issueDate || null, normalized.dueDate || null,
+      totals.excludingTax, totals.tax, totals.includingTax,
+      json({ ...normalized, id: invoiceId, number: null }), now, invoiceId, companyId
+    );
+
+    this.#appendEvent(invoiceId, 'draft_updated', {});
+    return this.getInvoice(invoiceId, companyId);
+  }
+
+  finalize(invoiceId, companyId) {
+    return this.finalizeTransaction(invoiceId, companyId);
+  }
+
+  getInvoice(invoiceId, companyId) {
+    const row = this.db.prepare('SELECT * FROM invoices WHERE id = ? AND company_id = ?').get(invoiceId, companyId);
+    return row ? hydrateInvoice(row) : null;
+  }
+
+  listInvoices(companyId, { limit = 50 } = {}) {
+    this.#requireCompany(companyId);
+    const safeLimit = Math.min(200, Math.max(1, Number.parseInt(limit, 10) || 50));
+    return this.db.prepare(`
+      SELECT * FROM invoices
+      WHERE company_id = ?
+      ORDER BY created_at DESC
+      LIMIT ?
+    `).all(companyId, safeLimit).map(hydrateInvoice);
+  }
+
+  listEvents(invoiceId, companyId) {
+    this.#requireInvoice(invoiceId, companyId);
+    return this.db.prepare(`
+      SELECT id, event_type, payload_json, created_at
+      FROM invoice_events
+      WHERE invoice_id = ?
+      ORDER BY id ASC
+    `).all(invoiceId).map(row => ({
+      id: row.id,
+      type: row.event_type,
+      payload: parseJson(row.payload_json, {}),
+      createdAt: row.created_at
+    }));
+  }
+
+  #finalize(invoiceId, companyId) {
+    const current = this.#requireInvoice(invoiceId, companyId);
+    if (current.status === 'finalized') return hydrateInvoice(current);
+    if (current.status !== 'draft') {
+      throw new RepositoryError('Ce document ne peut pas être finalisé.', 409, 'invalid_invoice_state');
+    }
+
+    const canonical = parseJson(current.canonical_json, {});
+    assertFinalizable(canonical);
+
+    const number = this.#allocateNumber(companyId, current.document_type);
+    const now = timestamp();
+    const finalCanonical = {
+      ...canonical,
+      id: invoiceId,
+      number,
+      electronicInvoice: {
+        ...(canonical.electronicInvoice || {}),
+        lifecycleStatus: 'finalized',
+        transmissionStatus: canonical.electronicInvoice?.transmissionStatus || 'not_sent'
+      }
+    };
+
+    this.db.prepare(`
+      UPDATE invoices
+      SET status = 'finalized', invoice_number = ?, canonical_json = ?,
+          updated_at = ?, finalized_at = ?
+      WHERE id = ? AND company_id = ?
+    `).run(number, json(finalCanonical), now, now, invoiceId, companyId);
+
+    this.#appendEvent(invoiceId, 'finalized', { number, documentType: current.document_type });
+    return this.getInvoice(invoiceId, companyId);
+  }
+
+  #allocateNumber(companyId, documentType) {
+    const current = this.db.prepare(`
+      SELECT next_value FROM invoice_sequences
+      WHERE company_id = ? AND document_type = ?
+    `).get(companyId, documentType);
+    const number = current?.next_value || 1;
+    const now = timestamp();
+
+    if (current) {
+      this.db.prepare(`
+        UPDATE invoice_sequences
+        SET next_value = ?, updated_at = ?
+        WHERE company_id = ? AND document_type = ?
+      `).run(number + 1, now, companyId, documentType);
+    } else {
+      this.db.prepare(`
+        INSERT INTO invoice_sequences (company_id, document_type, next_value, updated_at)
+        VALUES (?, ?, ?, ?)
+      `).run(companyId, documentType, number + 1, now);
+    }
+
+    return number;
+  }
+
+  #upsertCustomer(companyId, buyer = {}) {
+    const normalized = normalizeParty(buyer);
+    if (!normalized.legalName) return null;
+    const now = timestamp();
+
+    if (normalized.siren) {
+      const existing = this.db.prepare(`
+        SELECT id FROM customers WHERE company_id = ? AND siren = ?
+      `).get(companyId, normalized.siren);
+      if (existing) {
+        this.db.prepare(`
+          UPDATE customers
+          SET customer_type = ?, legal_name = ?, party_json = ?, updated_at = ?
+          WHERE id = ?
+        `).run(normalized.type, normalized.legalName, json(normalized), now, existing.id);
+        return existing.id;
+      }
+    }
+
+    const id = randomUUID();
+    this.db.prepare(`
+      INSERT INTO customers (id, company_id, customer_type, legal_name, siren, party_json, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(id, companyId, normalized.type, normalized.legalName, normalized.siren || null, json(normalized), now, now);
+    return id;
+  }
+
+  #appendEvent(invoiceId, type, payload) {
+    this.db.prepare(`
+      INSERT INTO invoice_events (invoice_id, event_type, payload_json, created_at)
+      VALUES (?, ?, ?, ?)
+    `).run(invoiceId, type, json(payload || {}), timestamp());
+  }
+
+  #requireCompany(companyId) {
+    const row = this.db.prepare('SELECT id FROM companies WHERE id = ?').get(companyId);
+    if (!row) throw new RepositoryError('Entreprise introuvable.', 404, 'company_not_found');
+    return row;
+  }
+
+  #requireInvoice(invoiceId, companyId) {
+    const row = this.db.prepare('SELECT * FROM invoices WHERE id = ? AND company_id = ?').get(invoiceId, companyId);
+    if (!row) throw new RepositoryError('Document introuvable.', 404, 'invoice_not_found');
+    return row;
+  }
+}
+
+function normalizeCompany(profile = {}) {
+  const legalName = String(profile.legalName || '').trim();
+  if (!legalName) throw new RepositoryError('Le nom légal de l’entreprise est obligatoire.', 422, 'invalid_company');
+  return {
+    ...profile,
+    legalName,
+    siren: digits(profile.siren, 9),
+    siret: digits(profile.siret, 14)
+  };
+}
+
+function normalizeInvoice(invoice = {}) {
+  if (!invoice || typeof invoice !== 'object') throw new RepositoryError('Document invalide.', 422, 'invalid_invoice');
+  return {
+    ...invoice,
+    documentType: invoice.documentType === 'devis' ? 'devis' : 'facture',
+    seller: normalizeParty(invoice.seller || {}),
+    buyer: normalizeParty(invoice.buyer || {}),
+    lines: Array.isArray(invoice.lines) ? invoice.lines.map(line => ({ ...line })) : [],
+    number: null
+  };
+}
+
+function normalizeParty(party = {}) {
+  return {
+    ...party,
+    type: party.type === 'company' ? 'company' : 'individual',
+    legalName: String(party.legalName || '').trim(),
+    siren: digits(party.siren, 9),
+    siret: digits(party.siret, 14)
+  };
+}
+
+function assertFinalizable(invoice) {
+  const missing = [];
+  if (!invoice.issueDate) missing.push('date d’émission');
+  if (!invoice.seller?.legalName) missing.push('vendeur');
+  if (!invoice.seller?.siren) missing.push('SIREN vendeur');
+  if (!invoice.buyer?.legalName) missing.push('client');
+  if (!invoice.buyer?.address?.line1 || !invoice.buyer?.address?.postalCode || !invoice.buyer?.address?.city) missing.push('adresse client');
+  if (invoice.buyer?.type === 'company' && !invoice.buyer?.siren) missing.push('SIREN client professionnel');
+  if (!Array.isArray(invoice.lines) || !invoice.lines.length) missing.push('prestations');
+  if (invoice.operationCategory === 'unknown' || !invoice.operationCategory) missing.push('catégorie réglementaire');
+  if ((invoice.lines || []).some(line => !Number.isFinite(Number(line.totalExcludingTax)))) missing.push('prix des prestations');
+
+  if (missing.length) {
+    throw new RepositoryError(`Impossible de finaliser : ${missing.join(', ')}.`, 422, 'invoice_not_ready');
+  }
+}
+
+function calculateTotals(invoice) {
+  const excludingTax = roundMoney((invoice.lines || []).reduce((sum, line) => sum + finite(line.totalExcludingTax), 0));
+  const tax = roundMoney((invoice.taxBreakdown || []).reduce((sum, breakdown) => sum + finite(breakdown.taxAmount), 0));
+  return { excludingTax, tax, includingTax: roundMoney(excludingTax + tax) };
+}
+
+function hydrateCompany(row) {
+  return {
+    id: row.id,
+    ...parseJson(row.profile_json, {}),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+function hydrateInvoice(row) {
+  return {
+    id: row.id,
+    companyId: row.company_id,
+    customerId: row.customer_id,
+    status: row.status,
+    number: row.invoice_number,
+    documentType: row.document_type,
+    totals: {
+      excludingTax: row.total_excluding_tax,
+      tax: row.total_tax,
+      includingTax: row.total_including_tax
+    },
+    invoice: parseJson(row.canonical_json, {}),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    finalizedAt: row.finalized_at
+  };
+}
+
+function digits(value, length) {
+  const normalized = String(value || '').replace(/\D/g, '');
+  return normalized.length === length ? normalized : '';
+}
+
+function finite(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : 0;
+}
+
+function roundMoney(value) {
+  return Math.round((Number(value) + Number.EPSILON) * 100) / 100;
+}
+
+function json(value) {
+  return JSON.stringify(value ?? {});
+}
+
+function parseJson(value, fallback) {
+  try { return JSON.parse(value); } catch { return fallback; }
+}
+
+function timestamp() {
+  return new Date().toISOString();
+}
