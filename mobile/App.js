@@ -23,7 +23,24 @@ import {
   OPERATION_CATEGORIES
 } from '../src/domain/invoiceModel.js';
 import { validateElectronicInvoiceReadiness } from '../src/domain/invoiceCompliance.js';
+import {
+  hasReducedVatRate,
+  recalculateInvoiceTax,
+  setInvoiceTaxTreatment,
+  setLineVatRate,
+  setReducedRateCertification,
+  VAT_EXEMPTION_293B,
+  VAT_RATES,
+  VAT_REGIMES,
+  VAT_TREATMENTS
+} from '../src/domain/taxModel.js';
 import { loadCompanyProfile, saveCompanyProfile } from './src/storage/companyProfileStore.js';
+import {
+  finalizeInvoice,
+  isBackendConfigured,
+  saveInvoiceDraft,
+  syncCompanyProfile
+} from './src/services/smoothfactureApi.js';
 
 const EXAMPLE_TEXT = `Monsieur et Madame Thierry Hornoy
 7 rue de la Barre 62180 Neuville-Saint-Vaast
@@ -46,6 +63,8 @@ export default function App() {
   const [recognizing, setRecognizing] = useState(false);
   const [voiceStatus, setVoiceStatus] = useState('');
   const [error, setError] = useState('');
+  const [backendBusy, setBackendBusy] = useState(false);
+  const [backendMessage, setBackendMessage] = useState('');
   const dictationBaseRef = useRef('');
 
   useEffect(() => {
@@ -75,9 +94,7 @@ export default function App() {
   });
 
   const active = results[activeIndex] || null;
-  const total = useMemo(() => {
-    return active?.invoice?.lines?.reduce((sum, line) => sum + (line.totalExcludingTax || 0), 0) || 0;
-  }, [active]);
+  const totals = useMemo(() => active?.invoice?.totals || { excludingTax: 0, tax: 0, includingTax: 0 }, [active]);
 
   const startDictation = async () => {
     if (recognizing) {
@@ -115,7 +132,9 @@ export default function App() {
       return {
         envelope,
         invoice,
-        readiness: validateElectronicInvoiceReadiness(invoice)
+        readiness: validateElectronicInvoiceReadiness(invoice),
+        serverRecord: null,
+        dirty: true
       };
     });
 
@@ -126,20 +145,125 @@ export default function App() {
 
     setResults(parsed);
     setActiveIndex(0);
+    setBackendMessage('');
     setError('');
   };
 
   const updateActiveInvoice = updater => {
     setResults(current => current.map((entry, index) => {
-      if (index !== activeIndex) return entry;
+      if (index !== activeIndex || entry.serverRecord?.status === 'finalized') return entry;
       const invoice = updater(entry.invoice);
-      return { ...entry, invoice, readiness: validateElectronicInvoiceReadiness(invoice) };
+      return {
+        ...entry,
+        invoice,
+        readiness: validateElectronicInvoiceReadiness(invoice),
+        dirty: true
+      };
     }));
+    setBackendMessage('');
+  };
+
+  const ensureServerCompany = async () => {
+    if (!isBackendConfigured()) throw new Error('Serveur non configuré. Ajoutez EXPO_PUBLIC_SMOOTHFACTURE_API_URL.');
+    if (companyProfile?.serverId) return companyProfile;
+    const synced = await syncCompanyProfile(companyProfile);
+    setCompanyProfile(synced);
+    await saveCompanyProfile(synced);
+    return synced;
+  };
+
+  const persistActiveDraft = async () => {
+    const entry = results[activeIndex];
+    if (!entry) throw new Error('Aucun document à enregistrer.');
+    if (entry.serverRecord?.status === 'finalized') return entry.serverRecord;
+    if (entry.serverRecord && !entry.dirty) return entry.serverRecord;
+
+    const syncedCompany = await ensureServerCompany();
+    const record = await saveInvoiceDraft({
+      companyId: syncedCompany.serverId,
+      invoice: entry.invoice,
+      recordId: entry.serverRecord?.status === 'draft' ? entry.serverRecord.id : null
+    });
+
+    setResults(current => current.map((candidate, index) => index === activeIndex ? {
+      ...candidate,
+      invoice: record.invoice,
+      readiness: validateElectronicInvoiceReadiness(record.invoice),
+      serverRecord: record,
+      dirty: false
+    } : candidate));
+    return record;
+  };
+
+  const handleSaveDraft = async () => {
+    setBackendBusy(true);
+    setBackendMessage('');
+    try {
+      const record = await persistActiveDraft();
+      setBackendMessage(`${record.documentType === 'devis' ? 'Devis' : 'Facture'} enregistré${record.documentType === 'devis' ? '' : 'e'} comme brouillon.`);
+    } catch (caught) {
+      Alert.alert('Enregistrement impossible', caught.message);
+    } finally {
+      setBackendBusy(false);
+    }
+  };
+
+  const handleFinalize = async () => {
+    const entry = results[activeIndex];
+    if (!entry?.readiness?.ready) {
+      Alert.alert('Encore quelques vérifications', 'Complétez les points signalés avant de finaliser le document.');
+      return;
+    }
+
+    setBackendBusy(true);
+    setBackendMessage('');
+    try {
+      const draft = await persistActiveDraft();
+      const record = await finalizeInvoice({ companyId: draft.companyId, recordId: draft.id });
+      setResults(current => current.map((candidate, index) => index === activeIndex ? {
+        ...candidate,
+        invoice: record.invoice,
+        readiness: validateElectronicInvoiceReadiness(record.invoice),
+        serverRecord: record,
+        dirty: false
+      } : candidate));
+      setBackendMessage(`${record.documentType === 'devis' ? 'Devis' : 'Facture'} n°${record.number} finalisé${record.documentType === 'devis' ? '' : 'e'}.`);
+    } catch (caught) {
+      Alert.alert('Finalisation impossible', caught.message);
+    } finally {
+      setBackendBusy(false);
+    }
+  };
+
+  const handleCompanySave = async () => {
+    const local = recalculateCompanyTaxDefaults(companyProfile);
+    await saveCompanyProfile(local);
+    setCompanyProfile(local);
+
+    if (!isBackendConfigured()) {
+      Alert.alert('Enregistré sur cet appareil', 'Le serveur n’est pas encore configuré. La création reste disponible hors ligne.');
+      setScreen('create');
+      return;
+    }
+
+    setBackendBusy(true);
+    try {
+      const synced = await syncCompanyProfile(local);
+      setCompanyProfile(synced);
+      await saveCompanyProfile(synced);
+      Alert.alert('Entreprise synchronisée', 'Votre profil est maintenant enregistré sur le serveur de facturation.');
+      setScreen('create');
+    } catch (caught) {
+      Alert.alert('Enregistré localement', `La synchronisation serveur a échoué : ${caught.message}`);
+    } finally {
+      setBackendBusy(false);
+    }
   };
 
   const reset = () => {
     setResults([]);
     setActiveIndex(0);
+    setBackendMessage('');
     setError('');
   };
 
@@ -161,11 +285,7 @@ export default function App() {
         </View>
 
         {screen === 'company' ? (
-          <CompanyScreen profile={companyProfile} onChange={setCompanyProfile} onSave={async () => {
-            await saveCompanyProfile(companyProfile);
-            Alert.alert('Enregistré', 'Les informations de votre entreprise seront utilisées pour les prochains documents.');
-            setScreen('create');
-          }} />
+          <CompanyScreen profile={companyProfile} onChange={setCompanyProfile} onSave={handleCompanySave} busy={backendBusy} />
         ) : (
           <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
             {!active ? (
@@ -213,12 +333,17 @@ export default function App() {
             ) : (
               <ReviewScreen
                 entry={active}
-                total={total}
+                totals={totals}
                 activeIndex={activeIndex}
                 count={results.length}
                 onSelect={setActiveIndex}
                 onBack={reset}
                 updateInvoice={updateActiveInvoice}
+                onSaveDraft={handleSaveDraft}
+                onFinalize={handleFinalize}
+                backendBusy={backendBusy}
+                backendMessage={backendMessage}
+                backendConfigured={isBackendConfigured()}
               />
             )}
           </ScrollView>
@@ -228,17 +353,21 @@ export default function App() {
   );
 }
 
-function ReviewScreen({ entry, total, activeIndex, count, onSelect, onBack, updateInvoice }) {
-  const { envelope, invoice, readiness } = entry;
+function ReviewScreen({ entry, totals, activeIndex, count, onSelect, onBack, updateInvoice, onSaveDraft, onFinalize, backendBusy, backendMessage, backendConfigured }) {
+  const { envelope, invoice, readiness, serverRecord, dirty } = entry;
   const parserQuestions = envelope.interpretation?.questions || [];
   const addressText = formatAddress(invoice.buyer.address);
+  const finalized = serverRecord?.status === 'finalized';
+  const tax = invoice.tax || {};
 
   return (
     <View>
-      <Pressable onPress={onBack}><Text style={styles.back}>‹ Modifier mon texte</Text></Pressable>
-      <Text style={styles.eyebrow}>{readiness.ready ? 'PRÊT' : `${readiness.blockingCount} POINT${readiness.blockingCount > 1 ? 'S' : ''} À VÉRIFIER`}</Text>
-      <Text style={styles.title}>{readiness.ready ? 'Votre document est structuré.' : 'Voici ce que nous avons compris.'}</Text>
-      <Text style={styles.subtitle}>Le PDF et l’envoi électronique seront branchés sur ce même modèle, sans vous demander de ressaisir le chantier.</Text>
+      <Pressable onPress={onBack}><Text style={styles.back}>‹ {finalized ? 'Créer un autre document' : 'Modifier mon texte'}</Text></Pressable>
+      <Text style={styles.eyebrow}>{finalized ? `FINALISÉ · N°${serverRecord.number}` : (readiness.ready ? 'PRÊT' : `${readiness.blockingCount} POINT${readiness.blockingCount > 1 ? 'S' : ''} À VÉRIFIER`)}</Text>
+      <Text style={styles.title}>{finalized ? 'Votre document est verrouillé.' : (readiness.ready ? 'Votre document est structuré.' : 'Voici ce que nous avons compris.')}</Text>
+      <Text style={styles.subtitle}>{finalized
+        ? 'Le numéro a été attribué par le serveur. Le contenu ne peut plus être modifié ; les prochains statuts seront ajoutés à son historique.'
+        : 'Vérifiez les informations utiles puis enregistrez un brouillon ou finalisez le document.'}</Text>
 
       {count > 1 && <View style={styles.tabs}>{Array.from({ length: count }, (_, index) => (
         <Pressable key={index} style={[styles.tab, activeIndex === index && styles.tabActive]} onPress={() => onSelect(index)}>
@@ -248,9 +377,9 @@ function ReviewScreen({ entry, total, activeIndex, count, onSelect, onBack, upda
 
       <Summary label="Client" value={invoice.buyer.legalName || 'À compléter'} detail={addressText || 'Adresse à compléter'} />
       <Summary label="Prestations" value={`${invoice.lines.length} ligne${invoice.lines.length > 1 ? 's' : ''}`} detail={invoice.lines.map(line => line.description).join(' · ')} />
-      <Summary label="Total HT" value={formatEuro(total)} detail={invoice.taxBreakdown?.[0]?.exemptionReason || 'TVA à vérifier'} />
+      <Summary label="Total HT" value={formatEuro(totals.excludingTax)} detail={`TVA ${formatEuro(totals.tax)} · Total TTC ${formatEuro(totals.includingTax)}`} />
 
-      <View style={styles.card}>
+      {!finalized && <View style={styles.card}>
         <Text style={styles.cardKicker}>CLIENT</Text>
         <Field label="Nom" value={invoice.buyer.legalName} onChange={value => updateInvoice(current => ({ ...current, buyer: { ...current.buyer, legalName: value } }))} />
         <Field label="Adresse" value={addressText} multiline onChange={value => updateInvoice(current => ({ ...current, buyer: { ...current.buyer, address: parseAddress(value) } }))} />
@@ -262,9 +391,9 @@ function ReviewScreen({ entry, total, activeIndex, count, onSelect, onBack, upda
         {invoice.buyer.type === CUSTOMER_TYPES.COMPANY && (
           <Field label="SIREN du client" keyboardType="number-pad" value={invoice.buyer.siren} onChange={value => updateInvoice(current => ({ ...current, buyer: { ...current.buyer, siren: value.replace(/\D/g, '').slice(0, 9) } }))} />
         )}
-      </View>
+      </View>}
 
-      <View style={styles.card}>
+      {!finalized && <View style={styles.card}>
         <Text style={styles.cardKicker}>CATÉGORIE RÉGLEMENTAIRE</Text>
         <Text style={styles.help}>Facture électronique : biens, services, ou les deux.</Text>
         <View style={styles.categoryWrap}>
@@ -272,9 +401,53 @@ function ReviewScreen({ entry, total, activeIndex, count, onSelect, onBack, upda
           <Choice label="Biens" selected={invoice.operationCategory === OPERATION_CATEGORIES.GOODS} onPress={() => updateInvoice(current => ({ ...current, operationCategory: OPERATION_CATEGORIES.GOODS }))} />
           <Choice label="Les deux" selected={invoice.operationCategory === OPERATION_CATEGORIES.MIXED} onPress={() => updateInvoice(current => ({ ...current, operationCategory: OPERATION_CATEGORIES.MIXED }))} />
         </View>
+      </View>}
+
+      <View style={styles.card}>
+        <Text style={styles.cardKicker}>TVA</Text>
+        {tax.regime === VAT_REGIMES.EXEMPT_293B ? (
+          <>
+            <Text style={styles.readinessTitle}>Franchise en base de TVA</Text>
+            <Text style={styles.help}>{tax.exemptionReason || VAT_EXEMPTION_293B}</Text>
+          </>
+        ) : (
+          <>
+            {!finalized && <>
+              <Text style={styles.fieldLabel}>Traitement</Text>
+              <View style={styles.segmentRow}>
+                <Choice label="TVA normale" selected={tax.treatment === VAT_TREATMENTS.DOMESTIC} onPress={() => updateInvoice(current => setInvoiceTaxTreatment(current, VAT_TREATMENTS.DOMESTIC))} />
+                <Choice label="Autoliquidation BTP" selected={tax.treatment === VAT_TREATMENTS.REVERSE_CHARGE_BTP} onPress={() => updateInvoice(current => setInvoiceTaxTreatment(current, VAT_TREATMENTS.REVERSE_CHARGE_BTP))} />
+              </View>
+            </>}
+
+            {tax.treatment === VAT_TREATMENTS.REVERSE_CHARGE_BTP ? (
+              <Text style={styles.help}>Facture HT sans TVA collectée. La mention « Autoliquidation » sera portée sur le document.</Text>
+            ) : (
+              <View>
+                {invoice.lines.map((line, index) => <View key={line.id} style={styles.taxLine}>
+                  <Text style={styles.taxLineTitle}>{index + 1}. {line.description || 'Prestation'}</Text>
+                  <Text style={styles.help}>{formatEuro(line.totalExcludingTax || 0)} HT · TVA {line.vatRate == null ? 'à choisir' : `${formatRate(line.vatRate)} %`}</Text>
+                  {!finalized && <View style={styles.categoryWrap}>{VAT_RATES.map(rate => (
+                    <Choice key={rate} label={`${formatRate(rate)} %`} selected={Number(line.vatRate) === rate} onPress={() => updateInvoice(current => setLineVatRate(current, line.id, rate))} />
+                  ))}</View>}
+                </View>)}
+
+                {hasReducedVatRate(invoice) && <View style={styles.reducedRateBox}>
+                  <Text style={styles.help}>Les taux 5,5 % et 10 % dépendent des conditions du chantier. Facture Facile ne les déduit pas automatiquement.</Text>
+                  {!finalized && <Choice
+                    label={tax.reducedRateCertificationConfirmed ? '✓ Conditions confirmées' : 'Confirmer les conditions du taux réduit'}
+                    selected={tax.reducedRateCertificationConfirmed}
+                    onPress={() => updateInvoice(current => setReducedRateCertification(current, !current.tax?.reducedRateCertificationConfirmed))}
+                  />}
+                </View>}
+              </View>
+            )}
+          </>
+        )}
+        <Text style={styles.taxTotals}>HT {formatEuro(totals.excludingTax)} · TVA {formatEuro(totals.tax)} · TTC {formatEuro(totals.includingTax)}</Text>
       </View>
 
-      {(parserQuestions.length > 0 || readiness.issues.length > 0) && (
+      {!finalized && (parserQuestions.length > 0 || readiness.issues.length > 0) && (
         <View style={styles.warningCard}>
           <Text style={styles.cardKicker}>À VÉRIFIER</Text>
           {parserQuestions.slice(0, 5).map(question => <Text key={question.id} style={styles.issue}>• {question.prompt}</Text>)}
@@ -282,26 +455,48 @@ function ReviewScreen({ entry, total, activeIndex, count, onSelect, onBack, upda
         </View>
       )}
 
-      <View style={[styles.readiness, readiness.ready && styles.readinessReady]}>
-        <Text style={styles.readinessTitle}>{readiness.ready ? '✓ Données P0 prêtes' : 'Conformité en préparation'}</Text>
-        <Text style={styles.readinessText}>{readiness.ready
-          ? 'Le modèle contient les données nécessaires pour passer à la génération Factur-X et à la connexion d’une plateforme agréée.'
-          : 'Complétez les points signalés. Le document ne sera pas transmis tant que des données obligatoires manquent.'}</Text>
+      <View style={[styles.readiness, (readiness.ready || finalized) && styles.readinessReady]}>
+        <Text style={styles.readinessTitle}>{finalized ? `✓ ${invoice.documentType === 'devis' ? 'Devis' : 'Facture'} n°${serverRecord.number}` : (readiness.ready ? '✓ Données P0 prêtes' : 'Conformité en préparation')}</Text>
+        <Text style={styles.readinessText}>{finalized
+          ? `Finalisé le ${formatServerDate(serverRecord.finalizedAt)}. Numéro attribué par le serveur et contenu désormais immuable.`
+          : (readiness.ready
+            ? 'Le document peut être enregistré puis finalisé. Le serveur recalculera les montants avant d’attribuer le numéro.'
+            : 'Complétez les points signalés. Aucun numéro final ne sera consommé pour un brouillon.')}</Text>
       </View>
+
+      {!finalized && <>
+        {!backendConfigured && <View style={styles.warningCard}><Text style={styles.issue}>Serveur non configuré : vous pouvez vérifier le document, mais pas encore enregistrer ou finaliser.</Text></View>}
+        {!!backendMessage && <Text style={styles.serverMessage}>{backendMessage}</Text>}
+        <Pressable disabled={!backendConfigured || backendBusy} style={[styles.secondaryWideButton, (!backendConfigured || backendBusy) && styles.disabledButton]} onPress={onSaveDraft}>
+          <Text style={styles.secondaryButtonText}>{backendBusy ? 'Enregistrement…' : (serverRecord?.status === 'draft' && !dirty ? 'Brouillon enregistré ✓' : 'Enregistrer le brouillon')}</Text>
+        </Pressable>
+        <Pressable disabled={!backendConfigured || backendBusy || !readiness.ready} style={[styles.primaryButton, (!backendConfigured || backendBusy || !readiness.ready) && styles.disabledButton]} onPress={onFinalize}>
+          <Text style={styles.primaryButtonText}>{backendBusy ? 'Finalisation…' : `Finaliser ${invoice.documentType === 'devis' ? 'le devis' : 'la facture'}`}</Text>
+        </Pressable>
+        <Text style={styles.privacy}>La finalisation attribue un numéro définitif. Le document ne pourra plus être modifié.</Text>
+      </>}
+      {finalized && !!backendMessage && <Text style={styles.serverMessage}>{backendMessage}</Text>}
     </View>
   );
 }
 
-function CompanyScreen({ profile, onChange, onSave }) {
+function CompanyScreen({ profile, onChange, onSave, busy }) {
   const update = (section, field, value) => onChange(current => section
     ? { ...current, [section]: { ...current[section], [field]: value } }
     : { ...current, [field]: value });
+
+  const setVatRegime = regime => onChange(current => ({
+    ...current,
+    tax: regime === VAT_REGIMES.EXEMPT_293B
+      ? { ...current.tax, vatRegime: regime, defaultVatRate: 0, exemptionReason: VAT_EXEMPTION_293B }
+      : { ...current.tax, vatRegime: regime, defaultVatRate: current.tax?.defaultVatRate && current.tax.defaultVatRate !== 0 ? current.tax.defaultVatRate : 20, exemptionReason: '' }
+  }));
 
   return (
     <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
       <Text style={styles.eyebrow}>P0 · IDENTITÉ ENTREPRISE</Text>
       <Text style={styles.title}>Les informations qui signent vos factures.</Text>
-      <Text style={styles.subtitle}>Elles sont enregistrées sur cet appareil pour cette première version mobile. La synchronisation serveur viendra avec la numérotation durable.</Text>
+      <Text style={styles.subtitle}>Le profil reste disponible sur cet appareil et, lorsque le serveur est configuré, il est synchronisé pour la numérotation et l’historique.</Text>
       <View style={styles.card}>
         <Field label="Nom légal" value={profile.legalName} onChange={value => update(null, 'legalName', value)} />
         <Field label="SIREN" keyboardType="number-pad" value={profile.siren} onChange={value => update(null, 'siren', value.replace(/\D/g, '').slice(0, 9))} />
@@ -312,11 +507,21 @@ function CompanyScreen({ profile, onChange, onSave }) {
         <Field label="E-mail" keyboardType="email-address" value={profile.contact.email} onChange={value => update('contact', 'email', value)} />
         <Field label="Téléphone" keyboardType="phone-pad" value={profile.contact.phone} onChange={value => update('contact', 'phone', value)} />
       </View>
-      <View style={styles.readiness}>
-        <Text style={styles.readinessTitle}>TVA actuelle</Text>
-        <Text style={styles.readinessText}>{profile.tax.exemptionReason || 'Régime TVA à configurer'}</Text>
+
+      <View style={styles.card}>
+        <Text style={styles.cardKicker}>RÉGIME TVA</Text>
+        <View style={styles.segmentRow}>
+          <Choice label="Franchise 293 B" selected={profile.tax?.vatRegime !== VAT_REGIMES.STANDARD} onPress={() => setVatRegime(VAT_REGIMES.EXEMPT_293B)} />
+          <Choice label="Assujetti TVA" selected={profile.tax?.vatRegime === VAT_REGIMES.STANDARD} onPress={() => setVatRegime(VAT_REGIMES.STANDARD)} />
+        </View>
+        {profile.tax?.vatRegime === VAT_REGIMES.STANDARD ? <>
+          <Text style={[styles.fieldLabel, styles.sectionGap]}>Taux par défaut</Text>
+          <View style={styles.categoryWrap}>{VAT_RATES.map(rate => <Choice key={rate} label={`${formatRate(rate)} %`} selected={Number(profile.tax?.defaultVatRate) === rate} onPress={() => update('tax', 'defaultVatRate', rate)} />)}</View>
+          <Text style={styles.help}>Le taux par défaut initialise les lignes. Vous pourrez choisir 20 %, 10 % ou 5,5 % ligne par ligne avant finalisation.</Text>
+        </> : <Text style={[styles.help, styles.sectionGap]}>{profile.tax?.exemptionReason || VAT_EXEMPTION_293B}</Text>}
       </View>
-      <Pressable style={styles.primaryButton} onPress={onSave}><Text style={styles.primaryButtonText}>Enregistrer mon entreprise</Text></Pressable>
+
+      <Pressable disabled={busy} style={[styles.primaryButton, busy && styles.disabledButton]} onPress={onSave}><Text style={styles.primaryButtonText}>{busy ? 'Synchronisation…' : 'Enregistrer mon entreprise'}</Text></Pressable>
     </ScrollView>
   );
 }
@@ -351,8 +556,25 @@ function parseAddress(value) {
   };
 }
 
+function recalculateCompanyTaxDefaults(profile) {
+  if (profile?.tax?.vatRegime === VAT_REGIMES.STANDARD) {
+    return { ...profile, tax: { ...profile.tax, defaultVatRate: Number(profile.tax.defaultVatRate) || 20, exemptionReason: '' } };
+  }
+  return { ...profile, tax: { ...profile.tax, vatRegime: VAT_REGIMES.EXEMPT_293B, defaultVatRate: 0, exemptionReason: profile?.tax?.exemptionReason || VAT_EXEMPTION_293B } };
+}
+
 function formatEuro(value) {
   return `${Number(value || 0).toFixed(2).replace('.', ',')} €`;
+}
+
+function formatRate(value) {
+  return Number(value).toLocaleString('fr-FR', { maximumFractionDigits: 1 });
+}
+
+function formatServerDate(value) {
+  if (!value) return '—';
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleDateString('fr-FR');
 }
 
 function speechErrorMessage(code) {
@@ -388,8 +610,10 @@ const styles = StyleSheet.create({
   composer: { minHeight: 210, backgroundColor: '#FFFFFF', borderRadius: 18, borderWidth: 1, borderColor: '#D8D2CA', padding: 16, fontSize: 16, lineHeight: 23, color: '#242126' },
   actionRow: { flexDirection: 'row', gap: 10, marginTop: 12, flexWrap: 'wrap' },
   secondaryButton: { borderRadius: 12, borderWidth: 1, borderColor: '#CFC7C0', paddingHorizontal: 14, paddingVertical: 11, backgroundColor: '#FFFFFF' },
+  secondaryWideButton: { borderRadius: 15, borderWidth: 1, borderColor: '#CFC7C0', paddingHorizontal: 18, paddingVertical: 15, backgroundColor: '#FFFFFF', marginTop: 18, alignItems: 'center' },
   listeningButton: { borderColor: '#A2465E', backgroundColor: '#F8E8ED' },
   secondaryButtonText: { color: '#4D474D', fontWeight: '700' },
+  disabledButton: { opacity: 0.45 },
   voiceStatus: { color: '#6D6670', marginTop: 10, fontSize: 13 },
   error: { color: '#A42D3C', marginTop: 12, fontWeight: '650' },
   primaryButton: { backgroundColor: '#6D3E54', borderRadius: 15, paddingHorizontal: 18, paddingVertical: 16, marginTop: 20, alignItems: 'center' },
@@ -417,5 +641,10 @@ const styles = StyleSheet.create({
   readiness: { backgroundColor: '#EEE9E4', borderRadius: 16, padding: 16, marginTop: 18 },
   readinessReady: { backgroundColor: '#E8F1E8' },
   readinessTitle: { fontWeight: '850', color: '#343038', marginBottom: 5 },
-  readinessText: { color: '#686169', lineHeight: 19, fontSize: 13 }
+  readinessText: { color: '#686169', lineHeight: 19, fontSize: 13 },
+  taxLine: { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: '#E5DFD8', paddingTop: 12, marginTop: 12 },
+  taxLineTitle: { color: '#343038', fontWeight: '750', marginBottom: 4 },
+  taxTotals: { color: '#343038', fontWeight: '800', marginTop: 14 },
+  reducedRateBox: { backgroundColor: '#F7F3EE', borderRadius: 12, padding: 12, marginTop: 14 },
+  serverMessage: { color: '#3E6B48', fontWeight: '750', textAlign: 'center', marginTop: 16 }
 });
