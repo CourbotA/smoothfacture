@@ -1,4 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { parseAmount, updateItemAmount, itemIsComplete } from '../services/invoiceAmounts.js';
+import { readDictationResults } from '../services/dictation.js';
 import InvoicePreview from '../components/InvoicePreview.jsx';
 import { interpretInvoiceInput } from '../services/parseEmail.js';
 import {
@@ -64,7 +66,9 @@ function InvoiceCreation() {
   const activeInvoice = activeResult?.invoice;
   const activeQuestions = activeResult?.interpretation?.questions || [];
   const totals = useMemo(() => computeInvoiceTotals(activeInvoice?.items || []), [activeInvoice]);
-  const allReady = results.length > 0 && results.every(result => !result.interpretation.questions.length);
+  const invoiceReady = invoice => Boolean(invoice?.client?.name?.trim() && invoice?.client?.address?.trim() && invoice?.items?.length && invoice.items.every(itemIsComplete));
+  const activeReady = !activeQuestions.length && invoiceReady(activeInvoice);
+  const allReady = results.length > 0 && results.every(result => !result.interpretation.questions.length && invoiceReady(result.invoice));
 
   useEffect(() => {
     const supported = Boolean(window.SpeechRecognition || window.webkitSpeechRecognition);
@@ -82,6 +86,10 @@ function InvoiceCreation() {
   };
 
   const handleParse = () => {
+    if (recognitionRef.current) {
+      setVoiceMessage('Arrêtez la dictée avant de préparer le document.');
+      return;
+    }
     if (!rawText.trim()) {
       setErrorMessage('Ajoutez quelques informations avant de continuer.');
       return;
@@ -107,7 +115,7 @@ function InvoiceCreation() {
   };
 
   const toggleVoice = () => {
-    if (listening) {
+    if (recognitionRef.current) {
       setVoiceMessage('Finalisation de la dictée…');
       recognitionRef.current?.stop();
       return;
@@ -120,7 +128,7 @@ function InvoiceCreation() {
     }
 
     const recognition = new SpeechRecognition();
-    const startingText = rawText.trim();
+    let committedResults = 0;
     recognition.lang = 'fr-FR';
     recognition.continuous = true;
     recognition.interimResults = true;
@@ -129,8 +137,10 @@ function InvoiceCreation() {
       setVoiceMessage('Parlez naturellement…');
     };
     recognition.onresult = event => {
-      const transcript = Array.from(event.results).map(result => result[0]?.transcript || '').join(' ').trim();
-      setRawText([startingText, transcript].filter(Boolean).join(startingText ? '\n' : ''));
+      const { transcript, interim, committedCount } = readDictationResults(event.results, committedResults);
+      committedResults = committedCount;
+      if (transcript) setRawText(current => [current, transcript].filter(Boolean).join('\n'));
+      setVoiceMessage(interim || 'Parlez naturellement…');
       setErrorMessage('');
     };
     recognition.onerror = event => {
@@ -140,7 +150,7 @@ function InvoiceCreation() {
     recognition.onend = () => {
       setListening(false);
       recognitionRef.current = null;
-      setVoiceMessage(current => ['Parlez naturellement…', 'Finalisation de la dictée…'].includes(current) ? 'Dictée ajoutée. Vous pouvez relire ou modifier le texte.' : current);
+      setVoiceMessage(current => !current || current === 'Parlez naturellement…' || current === 'Finalisation de la dictée…' ? 'Dictée ajoutée. Vous pouvez relire ou modifier le texte.' : current);
     };
     recognitionRef.current = recognition;
     try {
@@ -267,9 +277,7 @@ function InvoiceCreation() {
     updateActiveResult(result => {
       const items = result.invoice.items.map(item => {
         if (item.id !== itemId) return item;
-        const updated = { ...item, [field]: value };
-        if ((field === 'unitPrice' || field === 'total') && value.trim()) updated.hasExplicitPrice = true;
-        return updated;
+        return updateItemAmount(item, field, value);
       });
       const updatedItem = items.find(item => item.id === itemId);
       return {
@@ -308,7 +316,7 @@ function InvoiceCreation() {
   };
 
   const handleGenerateOne = () => {
-    if (!activeInvoice || activeQuestions.length) return;
+    if (!activeReady) return;
     const prepared = prepareInvoicesForGeneration([activeInvoice])[0];
     if (!prepared) return;
     generatePdf(prepared, { skipPrepare: true, autoSave: true });
@@ -335,7 +343,7 @@ function InvoiceCreation() {
             <li><span>2</span><div><strong>Vous vérifiez</strong><small>Seulement les points utiles</small></div></li>
             <li><span>3</span><div><strong>Vous téléchargez</strong><small>Un PDF propre, prêt à envoyer</small></div></li>
           </ol>
-          <div className="privacy-callout"><Icon name="check" size={18} /><span><strong>Simple et confidentiel</strong>Vos informations restent sur cet appareil.</span></div>
+          <div className="privacy-callout"><Icon name="check" size={18} /><span><strong>Simple et confidentiel</strong>Vos notes sont traitées sur cet appareil. La dictée peut utiliser le service de votre navigateur.</span></div>
         </div>
 
         <form className="composer-card" onSubmit={event => { event.preventDefault(); handleParse(); }} noValidate>
@@ -367,7 +375,7 @@ function InvoiceCreation() {
       {activeInvoice && (
         <section className="result-section" id="resultat">
           <div className="result-header">
-            <div><span className={activeQuestions.length ? 'attention-kicker' : 'success-kicker'}><Icon name={activeQuestions.length ? 'info' : 'check'} size={15} /> {activeQuestions.length ? `${activeQuestions.length} point${activeQuestions.length > 1 ? 's' : ''} à vérifier` : 'Tout est prêt'}</span><h2>{activeQuestions.length ? 'Voici ce que nous avons compris.' : `Votre ${labels.displayName.toLowerCase()} est ${documentType === 'devis' ? 'prêt' : 'prête'}.`}</h2><p>{activeQuestions.length ? 'Corrigez seulement ce qui mérite votre attention.' : 'Vérifiez l’aperçu exact, puis téléchargez le PDF.'}</p></div>
+            <div><span className={!activeReady ? 'attention-kicker' : 'success-kicker'}><Icon name={!activeReady ? 'info' : 'check'} size={15} /> {activeQuestions.length ? `${activeQuestions.length} point${activeQuestions.length > 1 ? 's' : ''} à vérifier` : (activeReady ? 'Tout est prêt' : 'Informations à compléter')}</span><h2>{!activeReady ? 'Voici ce que nous avons compris.' : `Votre ${labels.displayName.toLowerCase()} est ${documentType === 'devis' ? 'prêt' : 'prête'}.`}</h2><p>{activeQuestions.length ? 'Corrigez seulement ce qui mérite votre attention.' : 'Vérifiez l’aperçu exact, puis téléchargez le PDF.'}</p></div>
             <button type="button" className="text-button" onClick={handleReset}><Icon name="back" size={17} /> Modifier mon texte</button>
           </div>
 
@@ -385,13 +393,14 @@ function InvoiceCreation() {
           <div className="result-actions">
             <button type="button" className="secondary-action" onClick={() => setEditing(value => !value)}><Icon name="edit" size={18} /> {editing ? 'Fermer l’éditeur complet' : 'Modifier d’autres informations'}</button>
             {results.length > 1 && <button type="button" className="secondary-action" onClick={handleGenerateAll} disabled={!allReady}><Icon name="download" size={18} /> Tout télécharger</button>}
-            <button type="button" className="download-action" onClick={handleGenerateOne} disabled={Boolean(activeQuestions.length)}><Icon name="download" /> {activeQuestions.length ? 'Vérifiez les points ci-dessus' : 'Télécharger le PDF'}</button>
+            <button type="button" className="download-action" onClick={handleGenerateOne} disabled={!activeReady}><Icon name="download" /> {activeQuestions.length ? 'Vérifiez les points ci-dessus' : 'Télécharger le PDF'}</button>
           </div>
+          {!activeReady && !activeQuestions.length && <p role="alert">Complétez le nom, l’adresse et chaque prestation avec une quantité et un prix valides dans l’éditeur.</p>}
           {downloadMessage && <div className="download-message" role="status"><Icon name="check" size={16} /> {downloadMessage}</div>}
 
           {editing && <FullEditor invoice={activeInvoice} updateSection={updateSection} updateInvoice={updateInvoice} updateWorkDate={updateWorkDate} updateItem={updateItem} removeItem={removeItem} addItem={addItem} />}
 
-          {!activeQuestions.length ? <div className="preview-block"><div className="preview-toolbar"><div><span className="preview-dot" /> Aperçu exact du document</div><span>Format A4 · PDF</span></div><div className="preview-canvas"><InvoicePreview invoiceData={activeInvoice} /></div></div> : <div className="preview-pending"><Icon name="info" size={18} /><span>L’aperçu exact apparaîtra après ces vérifications.</span></div>}
+          {activeReady ? <div className="preview-block"><div className="preview-toolbar"><div><span className="preview-dot" /> Aperçu exact du document</div><span>Format A4 · PDF</span></div><div className="preview-canvas"><InvoicePreview invoiceData={activeInvoice} /></div></div> : <div className="preview-pending"><Icon name="info" size={18} /><span>L’aperçu exact apparaîtra après ces vérifications.</span></div>}
         </section>
       )}
     </>
@@ -419,7 +428,7 @@ function ReviewQuestion({ question, invoice, editing, editValue, onEditValue, on
 
 function FullEditor({ invoice, updateSection, updateInvoice, updateWorkDate, updateItem, removeItem, addItem }) {
   return <div className="edit-panel">
-    <div className="edit-panel-heading"><div><span>Éditeur complet</span><h3>Modifiez les autres informations si nécessaire</h3></div><span className="saved-label"><Icon name="check" size={14} /> Modifications enregistrées</span></div>
+    <div className="edit-panel-heading"><div><span>Éditeur complet</span><h3>Modifiez les autres informations si nécessaire</h3></div><span className="saved-label"><Icon name="check" size={14} /> Modifications appliquées</span></div>
     <div className="edit-fields">
       <label>Nom du client<input value={invoice.client?.name || ''} onChange={event => updateSection('client', 'name', event.target.value)} /></label>
       <label>Adresse du client<textarea rows="2" value={invoice.client?.address || ''} onChange={event => updateSection('client', 'address', event.target.value)} /></label>
@@ -435,7 +444,7 @@ function FullEditor({ invoice, updateSection, updateInvoice, updateWorkDate, upd
         <label>Qté<input value={item.quantity || '1,00'} onChange={event => updateItem(item.id, 'quantity', event.target.value)} /></label>
         <label>Unité<select value={item.unit || 'pce'} onChange={event => updateItem(item.id, 'unit', event.target.value)}><option value="pce">Pièce</option><option value="h">Heure</option><option value="forfait">Forfait</option></select></label>
         <label>Prix unitaire<input value={item.unitPrice || ''} onChange={event => updateItem(item.id, 'unitPrice', event.target.value)} /></label>
-        <label>Total<input value={item.total || ''} onChange={event => updateItem(item.id, 'total', event.target.value)} /></label>
+        <label>Total calculé<input value={item.total || ''} readOnly /></label>
         <button type="button" className="delete-item" onClick={() => removeItem(item.id)} aria-label={`Supprimer ${item.description || 'cette ligne'}`}><Icon name="trash" size={17} /></button>
       </div>)}
     </div>
@@ -447,7 +456,7 @@ function SummaryCard({ icon, label, title, lines, accent = false }) {
 }
 
 function parsePrice(value) {
-  const parsed = Number.parseFloat(String(value || '').replace(/€|euros?/giu, '').replace(',', '.').replace(/\s/g, ''));
+  const parsed = parseAmount(value);
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : NaN;
 }
 
