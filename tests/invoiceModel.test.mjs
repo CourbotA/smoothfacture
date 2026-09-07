@@ -4,6 +4,7 @@ import { interpretInvoiceInput } from '../src/services/invoiceInterpreter.js';
 import { cloneDefaultCompanyProfile } from '../src/config/defaultCompany.js';
 import { createCanonicalInvoice, CUSTOMER_TYPES, OPERATION_CATEGORIES } from '../src/domain/invoiceModel.js';
 import { validateElectronicInvoiceReadiness } from '../src/domain/invoiceCompliance.js';
+import { VAT_REGIMES, VAT_TREATMENTS } from '../src/domain/taxModel.js';
 
 test('canonical model preserves interpreted invoice facts and seller identifiers', () => {
   const [result] = interpretInvoiceInput(`Monsieur et Madame Thierry Hornoy
@@ -18,15 +19,19 @@ Meuble déplacement 48 €`);
     companyProfile: cloneDefaultCompanyProfile()
   });
 
-  assert.equal(invoice.schemaVersion, 1);
+  assert.equal(invoice.schemaVersion, 2);
   assert.equal(invoice.seller.siren, '538179649');
   assert.equal(invoice.seller.siret, '53817964900016');
   assert.equal(invoice.buyer.legalName, 'Monsieur et Madame Thierry Hornoy');
   assert.equal(invoice.lines.length, 2);
   assert.equal(invoice.lines[0].totalExcludingTax, 12);
   assert.equal(invoice.operationCategory, OPERATION_CATEGORIES.MIXED);
+  assert.equal(invoice.tax.regime, VAT_REGIMES.EXEMPT_293B);
+  assert.equal(invoice.tax.treatment, VAT_TREATMENTS.EXEMPT);
   assert.equal(invoice.taxBreakdown[0].vatRate, 0);
   assert.match(invoice.taxBreakdown[0].exemptionReason, /293 B/u);
+  assert.equal(invoice.totals.tax, 0);
+  assert.equal(invoice.totals.includingTax, invoice.totals.excludingTax);
 });
 
 test('professional buyer requires a SIREN for electronic invoice readiness', () => {
