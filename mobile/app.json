@@ -1,0 +1,26 @@
+{
+  "expo": {
+    "name": "Facture Facile",
+    "slug": "smoothfacture-mobile",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.smoothfacture.mobile"
+    },
+    "android": {
+      "package": "com.smoothfacture.mobile"
+    },
+    "plugins": [
+      [
+        "expo-speech-recognition",
+        {
+          "microphonePermission": "Autoriser Facture Facile à utiliser le microphone pour dicter vos factures.",
+          "speechRecognitionPermission": "Autoriser Facture Facile à convertir votre dictée en texte.",
+          "androidSpeechServicePackages": ["com.google.android.googlequicksearchbox"]
+        }
+      ]
+    ]
+  }
+}
