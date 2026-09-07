@@ -11,7 +11,8 @@ export async function syncCompanyProfile(profile) {
     method: serverId ? 'PUT' : 'POST',
     body: { profile: stripLocalFields(profile) }
   });
-  return { ...profile, ...result.company, serverId: result.company.id };
+  const { id, createdAt, updatedAt, ...serverProfile } = result.company;
+  return { ...profile, ...serverProfile, serverId: id, serverCreatedAt: createdAt, serverUpdatedAt: updatedAt };
 }
 
 export async function saveInvoiceDraft({ companyId, invoice, recordId = null }) {
@@ -68,7 +69,15 @@ async function request(path, { method = 'GET', body } = {}) {
 }
 
 function stripLocalFields(profile = {}) {
-  const { serverId, createdAt, updatedAt, ...serverProfile } = profile;
+  const {
+    id,
+    serverId,
+    createdAt,
+    updatedAt,
+    serverCreatedAt,
+    serverUpdatedAt,
+    ...serverProfile
+  } = profile;
   return serverProfile;
 }
 
