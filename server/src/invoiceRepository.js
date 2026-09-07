@@ -172,27 +172,20 @@ export class InvoiceRepository {
   }
 
   #allocateNumber(companyId, documentType) {
-    const current = this.db.prepare(`
-      SELECT next_value FROM invoice_sequences
-      WHERE company_id = ? AND document_type = ?
-    `).get(companyId, documentType);
-    const number = current?.next_value || 1;
     const now = timestamp();
+    const row = this.db.prepare(`
+      INSERT INTO invoice_sequences (company_id, document_type, next_value, updated_at)
+      VALUES (?, ?, 2, ?)
+      ON CONFLICT(company_id, document_type) DO UPDATE SET
+        next_value = invoice_sequences.next_value + 1,
+        updated_at = excluded.updated_at
+      RETURNING next_value - 1 AS number
+    `).get(companyId, documentType, now);
 
-    if (current) {
-      this.db.prepare(`
-        UPDATE invoice_sequences
-        SET next_value = ?, updated_at = ?
-        WHERE company_id = ? AND document_type = ?
-      `).run(number + 1, now, companyId, documentType);
-    } else {
-      this.db.prepare(`
-        INSERT INTO invoice_sequences (company_id, document_type, next_value, updated_at)
-        VALUES (?, ?, ?, ?)
-      `).run(companyId, documentType, number + 1, now);
+    if (!Number.isInteger(row?.number) || row.number < 1) {
+      throw new RepositoryError('Impossible de réserver un numéro de document.', 500, 'sequence_allocation_failed');
     }
-
-    return number;
+    return row.number;
   }
 
   #upsertCustomer(companyId, buyer = {}) {
