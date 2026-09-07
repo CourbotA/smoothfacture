@@ -21,6 +21,7 @@ export const DEFAULT_COMPANY_PROFILE = Object.freeze({
   tax: {
     vatRegime: 'exempt_293b',
     defaultVatRate: 0,
+    vatOnDebits: false,
     exemptionReason: 'TVA non applicable, art. 293 B du CGI'
   },
   payment: {
