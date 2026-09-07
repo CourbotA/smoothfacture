@@ -1,4 +1,5 @@
 import { CUSTOMER_TYPES, OPERATION_CATEGORIES } from './invoiceModel.js';
+import { validateTaxConfiguration } from './taxModel.js';
 
 export function validateElectronicInvoiceReadiness(invoice) {
   const issues = [];
@@ -23,9 +24,6 @@ export function validateElectronicInvoiceReadiness(invoice) {
       if (line.totalExcludingTax == null && !line.includedWithoutPrice) {
         issues.push(issue(`lines.${index}.price`, `Prix à vérifier sur la ligne ${index + 1}`, true));
       }
-      if (line.vatRate == null && !hasInvoiceTaxExemption(invoice)) {
-        issues.push(issue(`lines.${index}.vatRate`, `TVA à préciser sur la ligne ${index + 1}`, true));
-      }
     });
   }
 
@@ -41,6 +39,8 @@ export function validateElectronicInvoiceReadiness(invoice) {
       'regulatory_operation_category'
     ));
   }
+
+  issues.push(...validateTaxConfiguration(invoice));
 
   const blocking = issues.filter(candidate => candidate.blocking);
   return {
@@ -70,10 +70,6 @@ function requireAddress(issues, address, field, message) {
   if (!address || !String(address.line1 || '').trim() || !String(address.postalCode || '').trim() || !String(address.city || '').trim()) {
     issues.push(issue(field, message, true));
   }
-}
-
-function hasInvoiceTaxExemption(invoice) {
-  return Boolean(invoice?.taxBreakdown?.some(row => row.vatRate === 0 && String(row.exemptionReason || '').trim()));
 }
 
 function issue(field, message, blocking = false, code = 'missing_required_data') {
