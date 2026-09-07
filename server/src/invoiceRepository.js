@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto';
+import { validateElectronicInvoiceReadiness } from '../../src/domain/invoiceCompliance.js';
+import { recalculateInvoiceTax } from '../../src/domain/taxModel.js';
 
 export class RepositoryError extends Error {
   constructor(message, statusCode = 400, code = 'repository_error') {
@@ -144,7 +146,7 @@ export class InvoiceRepository {
       throw new RepositoryError('Ce document ne peut pas être finalisé.', 409, 'invalid_invoice_state');
     }
 
-    const canonical = parseJson(current.canonical_json, {});
+    const canonical = normalizeInvoice(parseJson(current.canonical_json, {}));
     assertFinalizable(canonical);
 
     const number = this.#allocateNumber(companyId, current.document_type);
@@ -159,13 +161,18 @@ export class InvoiceRepository {
         transmissionStatus: canonical.electronicInvoice?.transmissionStatus || 'not_sent'
       }
     };
+    const totals = calculateTotals(finalCanonical);
 
     this.db.prepare(`
       UPDATE invoices
       SET status = 'finalized', invoice_number = ?, canonical_json = ?,
+          total_excluding_tax = ?, total_tax = ?, total_including_tax = ?,
           updated_at = ?, finalized_at = ?
       WHERE id = ? AND company_id = ?
-    `).run(number, json(finalCanonical), now, now, invoiceId, companyId);
+    `).run(
+      number, json(finalCanonical), totals.excludingTax, totals.tax, totals.includingTax,
+      now, now, invoiceId, companyId
+    );
 
     this.#appendEvent(invoiceId, 'finalized', { number, documentType: current.document_type });
     return this.getInvoice(invoiceId, companyId);
@@ -248,14 +255,14 @@ function normalizeCompany(profile = {}) {
 
 function normalizeInvoice(invoice = {}) {
   if (!invoice || typeof invoice !== 'object') throw new RepositoryError('Document invalide.', 422, 'invalid_invoice');
-  return {
+  return recalculateInvoiceTax({
     ...invoice,
     documentType: invoice.documentType === 'devis' ? 'devis' : 'facture',
     seller: normalizeParty(invoice.seller || {}),
     buyer: normalizeParty(invoice.buyer || {}),
     lines: Array.isArray(invoice.lines) ? invoice.lines.map(line => ({ ...line })) : [],
     number: null
-  };
+  });
 }
 
 function normalizeParty(party = {}) {
@@ -269,26 +276,18 @@ function normalizeParty(party = {}) {
 }
 
 function assertFinalizable(invoice) {
-  const missing = [];
-  if (!invoice.issueDate) missing.push('date d’émission');
-  if (!invoice.seller?.legalName) missing.push('vendeur');
-  if (!invoice.seller?.siren) missing.push('SIREN vendeur');
-  if (!invoice.buyer?.legalName) missing.push('client');
-  if (!invoice.buyer?.address?.line1 || !invoice.buyer?.address?.postalCode || !invoice.buyer?.address?.city) missing.push('adresse client');
-  if (invoice.buyer?.type === 'company' && !invoice.buyer?.siren) missing.push('SIREN client professionnel');
-  if (!Array.isArray(invoice.lines) || !invoice.lines.length) missing.push('prestations');
-  if (invoice.operationCategory === 'unknown' || !invoice.operationCategory) missing.push('catégorie réglementaire');
-  if ((invoice.lines || []).some(line => !Number.isFinite(Number(line.totalExcludingTax)))) missing.push('prix des prestations');
-
-  if (missing.length) {
-    throw new RepositoryError(`Impossible de finaliser : ${missing.join(', ')}.`, 422, 'invoice_not_ready');
+  const readiness = validateElectronicInvoiceReadiness(invoice);
+  if (!readiness.ready) {
+    const messages = readiness.issues.filter(issue => issue.blocking).map(issue => issue.message);
+    throw new RepositoryError(`Impossible de finaliser : ${messages.join(' ; ')}`, 422, 'invoice_not_ready');
   }
 }
 
 function calculateTotals(invoice) {
-  const excludingTax = roundMoney((invoice.lines || []).reduce((sum, line) => sum + finite(line.totalExcludingTax), 0));
-  const tax = roundMoney((invoice.taxBreakdown || []).reduce((sum, breakdown) => sum + finite(breakdown.taxAmount), 0));
-  return { excludingTax, tax, includingTax: roundMoney(excludingTax + tax) };
+  const totals = invoice?.totals || {};
+  const excludingTax = roundMoney(finite(totals.excludingTax));
+  const tax = roundMoney(finite(totals.tax));
+  return { excludingTax, tax, includingTax: roundMoney(finite(totals.includingTax)) };
 }
 
 function hydrateCompany(row) {
