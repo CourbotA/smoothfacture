@@ -49,6 +49,9 @@ export function createCanonicalInvoice({ legacyInvoice = {}, companyProfile = nu
   );
   const billingAddress = buyer.billingAddress || buyer.address;
   const deliveryAddress = buyer.deliveryAddress || null;
+  const serviceOrSupplyDate = normalizeServiceOrSupplyDate(
+    legacyInvoice.serviceOrSupplyDate || legacyInvoice.intervention?.workDate
+  );
   const payment = {
     iban: companyProfile?.payment?.iban || legacyInvoice.payment?.iban || '',
     termsDays: companyProfile?.payment?.termsDays ?? null,
@@ -65,7 +68,7 @@ export function createCanonicalInvoice({ legacyInvoice = {}, companyProfile = nu
     invoiceType: normalizeInvoiceType(legacyInvoice.invoiceType),
     number: legacyInvoice.invoiceNumber || null,
     issueDate: legacyInvoice.invoiceDate || '',
-    serviceOrSupplyDate: legacyInvoice.serviceOrSupplyDate || legacyInvoice.intervention?.workDate || null,
+    serviceOrSupplyDate,
     dueDate: legacyInvoice.dueDate || '',
     currency: normalizeCurrency(legacyInvoice.currency) || 'EUR',
     seller,
@@ -129,7 +132,7 @@ export function upgradeCanonicalInvoice(invoice = {}, companyProfile = null) {
     currency: normalizeCurrency(current.currency) || 'EUR',
     seller,
     buyer,
-    serviceOrSupplyDate: current.serviceOrSupplyDate || current.work?.date || null,
+    serviceOrSupplyDate: normalizeServiceOrSupplyDate(current.serviceOrSupplyDate || current.work?.date),
     purchaseOrderReference: String(current.purchaseOrderReference || '').trim(),
     billingAddress: normalizeAddress(current.billingAddress || buyer.billingAddress || buyer.address),
     deliveryAddress: normalizeNullableAddress(current.deliveryAddress || buyer.deliveryAddress),
@@ -477,6 +480,18 @@ function normalizeElectronicAddress(value) {
     value: value?.value || '',
     source: value?.source || null
   };
+}
+
+function normalizeServiceOrSupplyDate(value) {
+  if (!value) return null;
+  if (typeof value === 'object') {
+    if (value.precision && value.precision !== 'day') return null;
+    return normalizeServiceOrSupplyDate(value.value || value.displayValue || '');
+  }
+  const text = String(value).trim();
+  if (/^\d{4}-\d{2}-\d{2}$/u.test(text)) return text;
+  if (/^\d{2}\/\d{2}\/\d{4}$/u.test(text)) return text;
+  return null;
 }
 
 function normalizeCurrency(value) {
