@@ -68,12 +68,14 @@ export function classifyRegulatoryRoute(invoice = {}, companyProfile = {}, effec
     });
   }
 
+  // Per-transaction exclusions are legally material and are not yet implemented.
+  // A client payload must never be able to self-declare itself outside the reform.
   if (invoice.regulatory?.outOfScopeReason) {
-    return result(REGULATORY_ROUTES.OUT_OF_SCOPE_EXEMPT_OPERATION, {
+    return result(REGULATORY_ROUTES.UNSUPPORTED_CASE, {
       date,
       companySizeCategory,
-      supportedByMvp: true,
-      reason: invoice.regulatory.outOfScopeReason
+      supportedByMvp: false,
+      reason: 'Les opérations déclarées hors champ nécessitent une validation réglementaire non encore prise en charge par le MVP.'
     });
   }
 
@@ -212,9 +214,11 @@ function result(route, {
       emissionStartDate,
       emissionMandatoryNow,
       reportingMandatoryNow,
-      mandatoryNow: requiresElectronicInvoice
-        ? emissionMandatoryNow
-        : (requiresTransactionReporting ? reportingMandatoryNow : false)
+      mandatoryNow: requiresChorusPro
+        ? true
+        : (requiresElectronicInvoice
+          ? emissionMandatoryNow
+          : (requiresTransactionReporting ? reportingMandatoryNow : false))
     }
   };
 }
