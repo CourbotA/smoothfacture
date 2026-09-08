@@ -18,7 +18,11 @@ export function validateElectronicInvoiceReadiness(invoice, options = {}) {
   const effectiveDate = options.effectiveDate || invoice?.issueDate || new Date();
   const classification = classifyRegulatoryRoute(invoice || {}, companyProfile, effectiveDate);
   const forceReform = Boolean(options.forceReform);
-  const reformBlocking = forceReform || classification.obligations.mandatoryNow === true;
+  const unknownSizeAfterReformStart = classification.companySizeCategory === 'unknown'
+    && isOnOrAfter(classification.effectiveDate, REFORM_DATES.RECEPTION_ALL);
+  const reformBlocking = forceReform
+    || classification.obligations.mandatoryNow === true
+    || unknownSizeAfterReformStart;
   const isInvoice = invoice?.documentType !== DOCUMENT_TYPES.QUOTE;
 
   requireValue(issues, invoice?.seller?.legalName, 'seller.legalName', 'Nom de votre entreprise à compléter', true);
