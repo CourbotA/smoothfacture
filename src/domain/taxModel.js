@@ -19,6 +19,9 @@ export function createInvoiceTaxSettings(companyProfile = {}) {
   if (regime === VAT_REGIMES.EXEMPT_293B) {
     return {
       regime,
+      vatLiability: 'exempt_293b',
+      filingRegime: companyProfile?.tax?.filingRegime || 'franchise_293b',
+      vatOnDebits: null,
       treatment: VAT_TREATMENTS.EXEMPT,
       defaultVatRate: 0,
       exemptionReason: companyProfile?.tax?.exemptionReason || VAT_EXEMPTION_293B,
@@ -29,6 +32,11 @@ export function createInvoiceTaxSettings(companyProfile = {}) {
 
   return {
     regime,
+    vatLiability: 'vat_registered',
+    filingRegime: companyProfile?.tax?.filingRegime || null,
+    vatOnDebits: typeof companyProfile?.tax?.vatOnDebits === 'boolean'
+      ? companyProfile.tax.vatOnDebits
+      : null,
     treatment: VAT_TREATMENTS.DOMESTIC,
     defaultVatRate: normalizeVatRate(companyProfile?.tax?.defaultVatRate) ?? 20,
     exemptionReason: '',
@@ -226,6 +234,11 @@ function normalizeTaxSettings(tax = {}) {
   return {
     ...tax,
     regime,
+    vatLiability: regime === VAT_REGIMES.EXEMPT_293B ? 'exempt_293b' : 'vat_registered',
+    filingRegime: tax.filingRegime || (regime === VAT_REGIMES.EXEMPT_293B ? 'franchise_293b' : null),
+    vatOnDebits: regime === VAT_REGIMES.EXEMPT_293B
+      ? null
+      : (typeof tax.vatOnDebits === 'boolean' ? tax.vatOnDebits : null),
     treatment,
     defaultVatRate,
     exemptionReason: treatment === VAT_TREATMENTS.EXEMPT ? (tax.exemptionReason || VAT_EXEMPTION_293B) : '',
