@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { validateElectronicInvoiceReadiness } from '../../src/domain/invoiceCompliance.js';
 import { recalculateInvoiceTax } from '../../src/domain/taxModel.js';
-import { upgradeCanonicalInvoice } from '../../src/domain/invoiceModel.js';
+import { companyToParty, upgradeCanonicalInvoice } from '../../src/domain/invoiceModel.js';
 
 export class RepositoryError extends Error {
   constructor(message, statusCode = 400, code = 'repository_error') {
@@ -32,7 +32,7 @@ export class InvoiceRepository {
       INSERT INTO companies (id, legal_name, siren, siret, profile_json, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, ?)
     `).run(id, normalized.legalName, normalized.siren, normalized.siret, json(normalized), now, now);
-    return { id, ...normalized, createdAt: now, updatedAt: now };
+    return { ...normalized, id, createdAt: now, updatedAt: now };
   }
 
   updateCompany(id, profile) {
@@ -45,7 +45,7 @@ export class InvoiceRepository {
       SET legal_name = ?, siren = ?, siret = ?, profile_json = ?, updated_at = ?
       WHERE id = ?
     `).run(normalized.legalName, normalized.siren, normalized.siret, json(normalized), now, id);
-    return { id, ...normalized, createdAt: current.created_at, updatedAt: now };
+    return { ...normalized, id, createdAt: current.created_at, updatedAt: now };
   }
 
   getCompany(id) {
@@ -264,24 +264,40 @@ export class InvoiceRepository {
 }
 
 function normalizeCompany(profile = {}) {
-  const legalName = String(profile.legalName || '').trim();
+  const {
+    id: ignoredId,
+    serverId: ignoredServerId,
+    createdAt: ignoredCreatedAt,
+    updatedAt: ignoredUpdatedAt,
+    serverCreatedAt: ignoredServerCreatedAt,
+    serverUpdatedAt: ignoredServerUpdatedAt,
+    ...safeProfile
+  } = profile || {};
+  void ignoredId;
+  void ignoredServerId;
+  void ignoredCreatedAt;
+  void ignoredUpdatedAt;
+  void ignoredServerCreatedAt;
+  void ignoredServerUpdatedAt;
+
+  const legalName = String(safeProfile.legalName || '').trim();
   if (!legalName) throw new RepositoryError('Le nom légal de l’entreprise est obligatoire.', 422, 'invalid_company');
   return {
-    ...profile,
+    ...safeProfile,
     legalName,
-    siren: digits(profile.siren, 9),
-    siret: digits(profile.siret, 14),
-    address: normalizeAddress(profile.address),
+    siren: digits(safeProfile.siren, 9),
+    siret: digits(safeProfile.siret, 14),
+    address: normalizeAddress(safeProfile.address),
     reform: {
       companySizeCategory: 'unknown',
-      establishedInFrance: profile.address?.countryCode === 'FR',
+      establishedInFrance: safeProfile.address?.countryCode === 'FR',
       supportsInternational: false,
       chorusProEnabled: false,
       vatGroup: false,
       fiscalRepresentative: false,
       selfBilling: false,
       paConnection: null,
-      ...(profile.reform || {})
+      ...(safeProfile.reform || {})
     }
   };
 }
@@ -292,7 +308,7 @@ function normalizeInvoice(invoice = {}, companyProfile = {}) {
   return recalculateInvoiceTax({
     ...upgraded,
     documentType: upgraded.documentType === 'devis' ? 'devis' : 'facture',
-    seller: upgradeCanonicalInvoice({ seller: upgraded.seller, buyer: {}, lines: [], documentType: 'devis' }, companyProfile).seller,
+    seller: companyToParty(companyProfile),
     buyer: normalizeParty(upgraded.buyer || {}),
     lines: Array.isArray(upgraded.lines) ? upgraded.lines.map(line => ({ ...line })) : [],
     number: null
@@ -334,8 +350,8 @@ function calculateTotals(invoice) {
 
 function hydrateCompany(row) {
   return {
-    id: row.id,
     ...parseJson(row.profile_json, {}),
+    id: row.id,
     createdAt: row.created_at,
     updatedAt: row.updated_at
   };
