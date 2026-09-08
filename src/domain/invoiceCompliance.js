@@ -146,7 +146,7 @@ function collectRegulatoryIssues(issues, invoice, classification, companyProfile
       invoice?.buyer?.siren,
       'buyer.siren',
       'SIREN du client professionnel à compléter pour la facture électronique.',
-      reformBlocking,
+      true,
       'missing_buyer_siren'
     );
   }
