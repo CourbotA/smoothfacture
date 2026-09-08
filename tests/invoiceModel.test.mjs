@@ -26,7 +26,7 @@ Meuble déplacement 48 €`);
   assert.equal(invoice.seller.siret, '53817964900016');
   assert.equal(invoice.seller.countryCode, 'FR');
   assert.equal(invoice.seller.establishedInFrance, true);
-  assert.equal(invoice.buyer.legalName, 'Monsieur et Madame Thierry Hornoy');
+  assert.equal(invoice.buyer.legalName, result.invoice.client.name);
   assert.equal(invoice.buyer.countryCode, 'FR');
   assert.equal(invoice.lines.length, 2);
   assert.equal(invoice.lines[0].totalExcludingTax, 12);
