@@ -30,6 +30,9 @@ function mergeCompanyProfile(base, stored) {
       ...(stored?.reform || {}),
       paConnection: stored?.reform?.paConnection ?? base.reform?.paConnection ?? null
     },
-    payment: { ...base.payment, ...(stored?.payment || {}) }
+    payment: { ...base.payment, ...(stored?.payment || {}) },
+    insurance: { ...base.insurance, ...(stored?.insurance || {}) },
+    onboarding: { ...base.onboarding, ...(stored?.onboarding || {}) },
+    lookup: stored?.lookup ?? base.lookup ?? null
   };
 }

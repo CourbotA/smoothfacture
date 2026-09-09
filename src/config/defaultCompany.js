@@ -45,7 +45,21 @@ export const DEFAULT_COMPANY_PROFILE = Object.freeze({
     discount: 'Escompte pour paiement anticipé : néant',
     lateFees: 'Pénalités de retard : 3 fois le taux d’intérêt légal',
     recoveryFee: 'Indemnité forfaitaire de recouvrement : 40 € (clients professionnels)'
-  }
+  },
+  insurance: {
+    status: 'unknown',
+    insurer: '',
+    policyNumber: '',
+    coverageArea: 'France',
+    decennialCoverage: null,
+    attestationReference: ''
+  },
+  onboarding: {
+    version: 1,
+    completedAt: null,
+    lastStep: 0
+  },
+  lookup: null
 });
 
 export function cloneDefaultCompanyProfile() {
