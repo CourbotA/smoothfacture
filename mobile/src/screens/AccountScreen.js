@@ -10,6 +10,7 @@ import {
 } from 'react-native';
 import {
   applyPaymentTerms,
+  getCompanySetupMissingFields,
   INSURANCE_STATUSES,
   PAYMENT_TERM_PRESETS
 } from '../../../src/domain/companyProfileSetup.js';
@@ -20,15 +21,16 @@ import {
 } from '../../../src/domain/taxModel.js';
 import { applyCompanyLookup, lookupCompanyBySiren } from '../services/companyLookup.js';
 
-export default function AccountScreen({ profile, onChange, onSave, onRestartOnboarding, busy }) {
+export default function AccountScreen({ profile, onSave, onRestartOnboarding, busy }) {
+  const [draft, setDraft] = useState(profile);
   const [lookupBusy, setLookupBusy] = useState(false);
   const [lookupMessage, setLookupMessage] = useState('');
 
-  const update = (section, field, value) => onChange(current => section
+  const update = (section, field, value) => setDraft(current => section
     ? { ...current, [section]: { ...(current[section] || {}), [field]: value } }
     : { ...current, [field]: value });
 
-  const setVatRegime = regime => onChange(current => ({
+  const setVatRegime = regime => setDraft(current => ({
     ...current,
     tax: regime === VAT_REGIMES.STANDARD
       ? {
@@ -55,8 +57,8 @@ export default function AccountScreen({ profile, onChange, onSave, onRestartOnbo
     setLookupBusy(true);
     setLookupMessage('');
     try {
-      const lookup = await lookupCompanyBySiren(profile.siren);
-      onChange(current => applyCompanyLookup(current, lookup));
+      const lookup = await lookupCompanyBySiren(draft.siren);
+      setDraft(current => applyCompanyLookup(current, lookup));
       setLookupMessage('Informations publiques mises à jour. Vérifiez puis enregistrez.');
     } catch (error) {
       setLookupMessage(error.message || 'Impossible de consulter l’Annuaire des Entreprises.');
@@ -65,8 +67,9 @@ export default function AccountScreen({ profile, onChange, onSave, onRestartOnbo
     }
   };
 
-  const paConnected = Boolean(profile.reform?.paConnection?.provider);
-  const insuranceNeedsReview = profile.insurance?.status === INSURANCE_STATUSES.UNKNOWN;
+  const missingFields = getCompanySetupMissingFields(draft);
+  const paConnected = Boolean(draft.reform?.paConnection?.provider);
+  const insuranceNeedsReview = draft.insurance?.status === INSURANCE_STATUSES.UNKNOWN;
 
   return (
     <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
@@ -82,58 +85,58 @@ export default function AccountScreen({ profile, onChange, onSave, onRestartOnbo
       </View>
 
       <Section title="ENTREPRISE">
-        <Field label="Nom légal" value={profile.legalName} onChange={value => update(null, 'legalName', value)} />
-        <Field label="SIREN" keyboardType="number-pad" value={profile.siren} onChange={value => update(null, 'siren', value.replace(/\D/g, '').slice(0, 9))} />
-        <Field label="SIRET" keyboardType="number-pad" value={profile.siret} onChange={value => update(null, 'siret', value.replace(/\D/g, '').slice(0, 14))} />
-        <Field label="Code APE" value={profile.apeCode} onChange={value => update(null, 'apeCode', value.toUpperCase())} />
-        <Field label="Adresse" value={profile.address?.line1} onChange={value => update('address', 'line1', value)} />
-        <Field label="Code postal" keyboardType="number-pad" value={profile.address?.postalCode} onChange={value => update('address', 'postalCode', value.replace(/\D/g, '').slice(0, 5))} />
-        <Field label="Ville" value={profile.address?.city} onChange={value => update('address', 'city', value)} />
-        <Field label="E-mail (optionnel)" keyboardType="email-address" autoCapitalize="none" value={profile.contact?.email} onChange={value => update('contact', 'email', value)} />
-        <Field label="Téléphone (optionnel)" keyboardType="phone-pad" value={profile.contact?.phone} onChange={value => update('contact', 'phone', value)} />
-        <Pressable disabled={lookupBusy || !/^\d{9}$/u.test(String(profile.siren || ''))} style={[styles.secondaryButton, (lookupBusy || !/^\d{9}$/u.test(String(profile.siren || ''))) && styles.disabled]} onPress={refreshFromDirectory}>
+        <Field label="Nom légal" value={draft.legalName} onChange={value => update(null, 'legalName', value)} />
+        <Field label="SIREN" keyboardType="number-pad" value={draft.siren} onChange={value => update(null, 'siren', value.replace(/\D/g, '').slice(0, 9))} />
+        <Field label="SIRET" keyboardType="number-pad" value={draft.siret} onChange={value => update(null, 'siret', value.replace(/\D/g, '').slice(0, 14))} />
+        <Field label="Code APE" value={draft.apeCode} onChange={value => update(null, 'apeCode', value.toUpperCase())} />
+        <Field label="Adresse" value={draft.address?.line1} onChange={value => update('address', 'line1', value)} />
+        <Field label="Code postal" keyboardType="number-pad" value={draft.address?.postalCode} onChange={value => update('address', 'postalCode', value.replace(/\D/g, '').slice(0, 5))} />
+        <Field label="Ville" value={draft.address?.city} onChange={value => update('address', 'city', value)} />
+        <Field label="E-mail (optionnel)" keyboardType="email-address" autoCapitalize="none" value={draft.contact?.email} onChange={value => update('contact', 'email', value)} />
+        <Field label="Téléphone (optionnel)" keyboardType="phone-pad" value={draft.contact?.phone} onChange={value => update('contact', 'phone', value)} />
+        <Pressable disabled={lookupBusy || !/^\d{9}$/u.test(String(draft.siren || ''))} style={[styles.secondaryButton, (lookupBusy || !/^\d{9}$/u.test(String(draft.siren || ''))) && styles.disabled]} onPress={refreshFromDirectory}>
           {lookupBusy ? <ActivityIndicator /> : <Text style={styles.secondaryText}>Actualiser depuis l’Annuaire des Entreprises</Text>}
         </Pressable>
         {!!lookupMessage && <Text style={styles.help}>{lookupMessage}</Text>}
       </Section>
 
       <Section title="TVA">
-        <Choice label="Franchise en base · art. 293 B" selected={profile.tax?.vatRegime !== VAT_REGIMES.STANDARD} onPress={() => setVatRegime(VAT_REGIMES.EXEMPT_293B)} />
-        <Choice label="Je facture la TVA" selected={profile.tax?.vatRegime === VAT_REGIMES.STANDARD} onPress={() => setVatRegime(VAT_REGIMES.STANDARD)} />
-        {profile.tax?.vatRegime === VAT_REGIMES.STANDARD ? <>
-          <Field label="Numéro de TVA intracommunautaire" autoCapitalize="characters" value={profile.tax?.vatNumber || profile.vatNumber} onChange={value => update('tax', 'vatNumber', value.replace(/\s/g, '').toUpperCase().slice(0, 20))} />
+        <Choice label="Franchise en base · art. 293 B" selected={draft.tax?.vatRegime !== VAT_REGIMES.STANDARD} onPress={() => setVatRegime(VAT_REGIMES.EXEMPT_293B)} />
+        <Choice label="Je facture la TVA" selected={draft.tax?.vatRegime === VAT_REGIMES.STANDARD} onPress={() => setVatRegime(VAT_REGIMES.STANDARD)} />
+        {draft.tax?.vatRegime === VAT_REGIMES.STANDARD ? <>
+          <Field label="Numéro de TVA intracommunautaire" autoCapitalize="characters" value={draft.tax?.vatNumber || draft.vatNumber} onChange={value => update('tax', 'vatNumber', value.replace(/\s/g, '').toUpperCase().slice(0, 20))} />
           <Text style={styles.fieldLabel}>TVA sur les débits</Text>
           <View style={styles.row}>
-            <Choice compact label="Oui" selected={profile.tax?.vatOnDebits === true} onPress={() => update('tax', 'vatOnDebits', true)} />
-            <Choice compact label="Non" selected={profile.tax?.vatOnDebits === false} onPress={() => update('tax', 'vatOnDebits', false)} />
-            <Choice compact label="À confirmer" selected={profile.tax?.vatOnDebits == null} onPress={() => update('tax', 'vatOnDebits', null)} />
+            <Choice compact label="Oui" selected={draft.tax?.vatOnDebits === true} onPress={() => update('tax', 'vatOnDebits', true)} />
+            <Choice compact label="Non" selected={draft.tax?.vatOnDebits === false} onPress={() => update('tax', 'vatOnDebits', false)} />
+            <Choice compact label="À confirmer" selected={draft.tax?.vatOnDebits == null} onPress={() => update('tax', 'vatOnDebits', null)} />
           </View>
           <Text style={styles.fieldLabel}>Taux par défaut</Text>
-          <View style={styles.row}>{VAT_RATES.map(rate => <Choice key={rate} compact label={`${formatRate(rate)} %`} selected={Number(profile.tax?.defaultVatRate) === rate} onPress={() => update('tax', 'defaultVatRate', rate)} />)}</View>
-        </> : <Text style={styles.help}>{profile.tax?.exemptionReason || VAT_EXEMPTION_293B}</Text>}
+          <View style={styles.row}>{VAT_RATES.map(rate => <Choice key={rate} compact label={`${formatRate(rate)} %`} selected={Number(draft.tax?.defaultVatRate) === rate} onPress={() => update('tax', 'defaultVatRate', rate)} />)}</View>
+        </> : <Text style={styles.help}>{draft.tax?.exemptionReason || VAT_EXEMPTION_293B}</Text>}
       </Section>
 
       <Section title="PAIEMENT">
         <Text style={styles.fieldLabel}>Délai habituel</Text>
-        <View style={styles.row}>{PAYMENT_TERM_PRESETS.map(item => <Choice key={item.key} compact label={item.label} selected={Number(profile.payment?.termsDays) === item.days} onPress={() => onChange(current => applyPaymentTerms(current, item.days))} />)}</View>
-        <Field label="Autre délai en jours" keyboardType="number-pad" value={profile.payment?.termsDays} onChange={value => onChange(current => applyPaymentTerms(current, value.replace(/\D/g, '').slice(0, 3)))} />
-        <Field label="IBAN (optionnel)" autoCapitalize="characters" value={profile.payment?.iban} onChange={value => update('payment', 'iban', value.replace(/\s/g, '').toUpperCase())} />
+        <View style={styles.row}>{PAYMENT_TERM_PRESETS.map(item => <Choice key={item.key} compact label={item.label} selected={Number(draft.payment?.termsDays) === item.days} onPress={() => setDraft(current => applyPaymentTerms(current, item.days))} />)}</View>
+        <Field label="Autre délai en jours" keyboardType="number-pad" value={draft.payment?.termsDays} onChange={value => setDraft(current => applyPaymentTerms(current, value.replace(/\D/g, '').slice(0, 3)))} />
+        <Field label="IBAN (optionnel)" autoCapitalize="characters" value={draft.payment?.iban} onChange={value => update('payment', 'iban', value.replace(/\s/g, '').toUpperCase())} />
         <Text style={styles.help}>Les clauses de retard et l’indemnité forfaitaire restent dans le profil et seront utilisées pour les clients professionnels.</Text>
       </Section>
 
       <Section title="ASSURANCE">
-        <Choice label="Assurance à faire apparaître" selected={profile.insurance?.status === INSURANCE_STATUSES.COVERED} onPress={() => update('insurance', 'status', INSURANCE_STATUSES.COVERED)} />
-        <Choice label="Non applicable" selected={profile.insurance?.status === INSURANCE_STATUSES.NOT_APPLICABLE} onPress={() => update('insurance', 'status', INSURANCE_STATUSES.NOT_APPLICABLE)} />
-        <Choice label="À confirmer" selected={profile.insurance?.status === INSURANCE_STATUSES.UNKNOWN} onPress={() => update('insurance', 'status', INSURANCE_STATUSES.UNKNOWN)} />
-        {profile.insurance?.status === INSURANCE_STATUSES.COVERED && <>
-          <Field label="Assureur" value={profile.insurance?.insurer} onChange={value => update('insurance', 'insurer', value)} />
-          <Field label="N° de police / contrat" value={profile.insurance?.policyNumber} onChange={value => update('insurance', 'policyNumber', value)} />
-          <Field label="Zone couverte" value={profile.insurance?.coverageArea} onChange={value => update('insurance', 'coverageArea', value)} />
+        <Choice label="Assurance à faire apparaître" selected={draft.insurance?.status === INSURANCE_STATUSES.COVERED} onPress={() => update('insurance', 'status', INSURANCE_STATUSES.COVERED)} />
+        <Choice label="Non applicable" selected={draft.insurance?.status === INSURANCE_STATUSES.NOT_APPLICABLE} onPress={() => update('insurance', 'status', INSURANCE_STATUSES.NOT_APPLICABLE)} />
+        <Choice label="À confirmer" selected={draft.insurance?.status === INSURANCE_STATUSES.UNKNOWN} onPress={() => update('insurance', 'status', INSURANCE_STATUSES.UNKNOWN)} />
+        {draft.insurance?.status === INSURANCE_STATUSES.COVERED && <>
+          <Field label="Assureur" value={draft.insurance?.insurer} onChange={value => update('insurance', 'insurer', value)} />
+          <Field label="N° de police / contrat" value={draft.insurance?.policyNumber} onChange={value => update('insurance', 'policyNumber', value)} />
+          <Field label="Zone couverte" value={draft.insurance?.coverageArea} onChange={value => update('insurance', 'coverageArea', value)} />
           <Text style={styles.fieldLabel}>Garantie décennale</Text>
           <View style={styles.row}>
-            <Choice compact label="Oui" selected={profile.insurance?.decennialCoverage === true} onPress={() => update('insurance', 'decennialCoverage', true)} />
-            <Choice compact label="Non" selected={profile.insurance?.decennialCoverage === false} onPress={() => update('insurance', 'decennialCoverage', false)} />
-            <Choice compact label="À confirmer" selected={profile.insurance?.decennialCoverage == null} onPress={() => update('insurance', 'decennialCoverage', null)} />
+            <Choice compact label="Oui" selected={draft.insurance?.decennialCoverage === true} onPress={() => update('insurance', 'decennialCoverage', true)} />
+            <Choice compact label="Non" selected={draft.insurance?.decennialCoverage === false} onPress={() => update('insurance', 'decennialCoverage', false)} />
+            <Choice compact label="À confirmer" selected={draft.insurance?.decennialCoverage == null} onPress={() => update('insurance', 'decennialCoverage', null)} />
           </View>
         </>}
       </Section>
@@ -141,11 +144,15 @@ export default function AccountScreen({ profile, onChange, onSave, onRestartOnbo
       <Section title="FACTURATION ÉLECTRONIQUE">
         <InfoRow label="Réception obligatoire" value="Depuis le 1er septembre 2026" />
         <InfoRow label="Émission TPE / PME" value="À partir du 1er septembre 2027" />
-        <InfoRow label="Plateforme Agréée" value={paConnected ? `Connectée · ${profile.reform.paConnection.provider}` : 'Non connectée'} />
+        <InfoRow label="Plateforme Agréée" value={paConnected ? `Connectée · ${draft.reform.paConnection.provider}` : 'Non connectée'} />
         {!paConnected && <Text style={styles.help}>La connexion à une Plateforme Agréée sera ajoutée dans l’étape d’intégration réglementaire. Elle ne bloque pas la saisie de vos brouillons aujourd’hui.</Text>}
       </Section>
 
-      <Pressable disabled={busy} style={[styles.primaryButton, busy && styles.disabled]} onPress={() => onSave(profile)}>
+      {missingFields.length > 0 && <View style={styles.warningCard}>
+        <Text style={styles.warningText}>Complétez les informations obligatoires avant d’enregistrer ces modifications.</Text>
+      </View>}
+
+      <Pressable disabled={busy || missingFields.length > 0} style={[styles.primaryButton, (busy || missingFields.length > 0) && styles.disabled]} onPress={() => onSave(draft)}>
         {busy ? <ActivityIndicator color="#FFFFFF" /> : <Text style={styles.primaryButtonText}>Enregistrer les modifications</Text>}
       </Pressable>
       <Pressable style={styles.linkButton} onPress={onRestartOnboarding}><Text style={styles.linkText}>Refaire la configuration guidée</Text></Pressable>
@@ -206,5 +213,7 @@ const styles = StyleSheet.create({
   linkText: { color: '#6D3E54', fontWeight: '750' },
   infoRow: { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: '#E2DDD6', paddingVertical: 10 },
   infoLabel: { color: '#777078', fontSize: 12, marginBottom: 3 },
-  infoValue: { color: '#343038', fontWeight: '750' }
+  infoValue: { color: '#343038', fontWeight: '750' },
+  warningCard: { backgroundColor: '#FFF7E8', borderRadius: 14, borderWidth: 1, borderColor: '#E9D7A9', padding: 13, marginTop: 18 },
+  warningText: { color: '#67573E', fontSize: 13, lineHeight: 19 }
 });
