@@ -25,6 +25,11 @@ function mergeCompanyProfile(base, stored) {
     address: { ...base.address, ...(stored?.address || {}) },
     contact: { ...base.contact, ...(stored?.contact || {}) },
     tax: { ...base.tax, ...(stored?.tax || {}) },
+    reform: {
+      ...base.reform,
+      ...(stored?.reform || {}),
+      paConnection: stored?.reform?.paConnection ?? base.reform?.paConnection ?? null
+    },
     payment: { ...base.payment, ...(stored?.payment || {}) }
   };
 }

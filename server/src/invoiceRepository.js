@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { validateElectronicInvoiceReadiness } from '../../src/domain/invoiceCompliance.js';
 import { recalculateInvoiceTax } from '../../src/domain/taxModel.js';
+import { companyToParty, upgradeCanonicalInvoice } from '../../src/domain/invoiceModel.js';
 
 export class RepositoryError extends Error {
   constructor(message, statusCode = 400, code = 'repository_error') {
@@ -31,7 +32,7 @@ export class InvoiceRepository {
       INSERT INTO companies (id, legal_name, siren, siret, profile_json, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, ?)
     `).run(id, normalized.legalName, normalized.siren, normalized.siret, json(normalized), now, now);
-    return { id, ...normalized, createdAt: now, updatedAt: now };
+    return { ...normalized, id, createdAt: now, updatedAt: now };
   }
 
   updateCompany(id, profile) {
@@ -44,7 +45,7 @@ export class InvoiceRepository {
       SET legal_name = ?, siren = ?, siret = ?, profile_json = ?, updated_at = ?
       WHERE id = ?
     `).run(normalized.legalName, normalized.siren, normalized.siret, json(normalized), now, id);
-    return { id, ...normalized, createdAt: current.created_at, updatedAt: now };
+    return { ...normalized, id, createdAt: current.created_at, updatedAt: now };
   }
 
   getCompany(id) {
@@ -53,8 +54,8 @@ export class InvoiceRepository {
   }
 
   createDraft(companyId, invoice) {
-    this.#requireCompany(companyId);
-    const normalized = normalizeInvoice(invoice);
+    const company = this.#requireCompany(companyId);
+    const normalized = normalizeInvoice(invoice, company);
     const id = randomUUID();
     const now = timestamp();
     const customerId = this.#upsertCustomer(companyId, normalized.buyer);
@@ -65,15 +66,20 @@ export class InvoiceRepository {
         id, company_id, customer_id, document_type, status, invoice_number,
         issue_date, due_date, currency, total_excluding_tax, total_tax,
         total_including_tax, canonical_json, created_at, updated_at, finalized_at
-      ) VALUES (?, ?, ?, ?, 'draft', NULL, ?, ?, 'EUR', ?, ?, ?, ?, ?, ?, NULL)
+      ) VALUES (?, ?, ?, ?, 'draft', NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
     `).run(
       id, companyId, customerId, normalized.documentType,
       normalized.issueDate || null, normalized.dueDate || null,
+      normalized.currency || 'EUR',
       totals.excludingTax, totals.tax, totals.includingTax,
       json({ ...normalized, id, number: null }), now, now
     );
 
-    this.#appendEvent(id, 'draft_created', { companyId });
+    this.#appendEvent(id, 'draft_created', {
+      companyId,
+      schemaVersion: normalized.schemaVersion,
+      regulatoryRoute: normalized.regulatory?.route || null
+    });
     return this.getInvoice(id, companyId);
   }
 
@@ -83,24 +89,29 @@ export class InvoiceRepository {
       throw new RepositoryError('Une facture finalisée ne peut plus être modifiée.', 409, 'invoice_immutable');
     }
 
-    const normalized = normalizeInvoice(invoice);
+    const company = this.#requireCompany(companyId);
+    const normalized = normalizeInvoice(invoice, company);
     const customerId = this.#upsertCustomer(companyId, normalized.buyer);
     const totals = calculateTotals(normalized);
     const now = timestamp();
 
     this.db.prepare(`
       UPDATE invoices
-      SET customer_id = ?, document_type = ?, issue_date = ?, due_date = ?,
+      SET customer_id = ?, document_type = ?, issue_date = ?, due_date = ?, currency = ?,
           total_excluding_tax = ?, total_tax = ?, total_including_tax = ?,
           canonical_json = ?, updated_at = ?
       WHERE id = ? AND company_id = ?
     `).run(
       customerId, normalized.documentType, normalized.issueDate || null, normalized.dueDate || null,
+      normalized.currency || 'EUR',
       totals.excludingTax, totals.tax, totals.includingTax,
       json({ ...normalized, id: invoiceId, number: null }), now, invoiceId, companyId
     );
 
-    this.#appendEvent(invoiceId, 'draft_updated', {});
+    this.#appendEvent(invoiceId, 'draft_updated', {
+      schemaVersion: normalized.schemaVersion,
+      regulatoryRoute: normalized.regulatory?.route || null
+    });
     return this.getInvoice(invoiceId, companyId);
   }
 
@@ -146,12 +157,13 @@ export class InvoiceRepository {
       throw new RepositoryError('Ce document ne peut pas être finalisé.', 409, 'invalid_invoice_state');
     }
 
-    const canonical = normalizeInvoice(parseJson(current.canonical_json, {}));
-    assertFinalizable(canonical);
+    const company = this.#requireCompany(companyId);
+    const canonical = normalizeInvoice(parseJson(current.canonical_json, {}), company);
+    assertFinalizable(canonical, company);
 
     const number = this.#allocateNumber(companyId, current.document_type);
     const now = timestamp();
-    const finalCanonical = {
+    const finalCanonical = recalculateInvoiceTax({
       ...canonical,
       id: invoiceId,
       number,
@@ -160,7 +172,7 @@ export class InvoiceRepository {
         lifecycleStatus: 'finalized',
         transmissionStatus: canonical.electronicInvoice?.transmissionStatus || 'not_sent'
       }
-    };
+    });
     const totals = calculateTotals(finalCanonical);
 
     this.db.prepare(`
@@ -174,7 +186,16 @@ export class InvoiceRepository {
       now, now, invoiceId, companyId
     );
 
-    this.#appendEvent(invoiceId, 'finalized', { number, documentType: current.document_type });
+    this.#appendEvent(invoiceId, 'finalized', {
+      number,
+      documentType: current.document_type,
+      schemaVersion: finalCanonical.schemaVersion,
+      regulatoryRoute: finalCanonical.regulatory?.route || null,
+      regulatoryReady: validateElectronicInvoiceReadiness(finalCanonical, {
+        companyProfile: company,
+        effectiveDate: finalCanonical.issueDate || now.slice(0, 10)
+      }).regulatoryReady
+    });
     return this.getInvoice(invoiceId, companyId);
   }
 
@@ -230,9 +251,9 @@ export class InvoiceRepository {
   }
 
   #requireCompany(companyId) {
-    const row = this.db.prepare('SELECT id FROM companies WHERE id = ?').get(companyId);
+    const row = this.db.prepare('SELECT * FROM companies WHERE id = ?').get(companyId);
     if (!row) throw new RepositoryError('Entreprise introuvable.', 404, 'company_not_found');
-    return row;
+    return hydrateCompany(row);
   }
 
   #requireInvoice(invoiceId, companyId) {
@@ -243,40 +264,77 @@ export class InvoiceRepository {
 }
 
 function normalizeCompany(profile = {}) {
-  const legalName = String(profile.legalName || '').trim();
+  const {
+    id: ignoredId,
+    serverId: ignoredServerId,
+    createdAt: ignoredCreatedAt,
+    updatedAt: ignoredUpdatedAt,
+    serverCreatedAt: ignoredServerCreatedAt,
+    serverUpdatedAt: ignoredServerUpdatedAt,
+    ...safeProfile
+  } = profile || {};
+  void ignoredId;
+  void ignoredServerId;
+  void ignoredCreatedAt;
+  void ignoredUpdatedAt;
+  void ignoredServerCreatedAt;
+  void ignoredServerUpdatedAt;
+
+  const legalName = String(safeProfile.legalName || '').trim();
   if (!legalName) throw new RepositoryError('Le nom légal de l’entreprise est obligatoire.', 422, 'invalid_company');
   return {
-    ...profile,
+    ...safeProfile,
     legalName,
-    siren: digits(profile.siren, 9),
-    siret: digits(profile.siret, 14)
+    siren: digits(safeProfile.siren, 9),
+    siret: digits(safeProfile.siret, 14),
+    address: normalizeAddress(safeProfile.address),
+    reform: {
+      companySizeCategory: 'unknown',
+      establishedInFrance: safeProfile.address?.countryCode === 'FR',
+      supportsInternational: false,
+      chorusProEnabled: false,
+      vatGroup: false,
+      fiscalRepresentative: false,
+      selfBilling: false,
+      paConnection: null,
+      ...(safeProfile.reform || {})
+    }
   };
 }
 
-function normalizeInvoice(invoice = {}) {
+function normalizeInvoice(invoice = {}, companyProfile = {}) {
   if (!invoice || typeof invoice !== 'object') throw new RepositoryError('Document invalide.', 422, 'invalid_invoice');
+  const upgraded = upgradeCanonicalInvoice(invoice, companyProfile);
   return recalculateInvoiceTax({
-    ...invoice,
-    documentType: invoice.documentType === 'devis' ? 'devis' : 'facture',
-    seller: normalizeParty(invoice.seller || {}),
-    buyer: normalizeParty(invoice.buyer || {}),
-    lines: Array.isArray(invoice.lines) ? invoice.lines.map(line => ({ ...line })) : [],
+    ...upgraded,
+    documentType: upgraded.documentType === 'devis' ? 'devis' : 'facture',
+    seller: companyToParty(companyProfile),
+    buyer: normalizeParty(upgraded.buyer || {}),
+    lines: Array.isArray(upgraded.lines) ? upgraded.lines.map(line => ({ ...line })) : [],
     number: null
   });
 }
 
 function normalizeParty(party = {}) {
+  const type = ['company', 'individual', 'public_entity'].includes(party.type) ? party.type : 'individual';
   return {
     ...party,
-    type: party.type === 'company' ? 'company' : 'individual',
+    type,
     legalName: String(party.legalName || '').trim(),
     siren: digits(party.siren, 9),
-    siret: digits(party.siret, 14)
+    siret: digits(party.siret, 14),
+    vatNumber: String(party.vatNumber || '').trim(),
+    foreignBusinessId: String(party.foreignBusinessId || '').trim(),
+    countryCode: normalizeCountryCode(party.countryCode || party.address?.countryCode),
+    address: normalizeAddress(party.address)
   };
 }
 
-function assertFinalizable(invoice) {
-  const readiness = validateElectronicInvoiceReadiness(invoice);
+function assertFinalizable(invoice, companyProfile) {
+  const readiness = validateElectronicInvoiceReadiness(invoice, {
+    companyProfile,
+    effectiveDate: invoice.issueDate || new Date()
+  });
   if (!readiness.ready) {
     const messages = readiness.issues.filter(issue => issue.blocking).map(issue => issue.message);
     throw new RepositoryError(`Impossible de finaliser : ${messages.join(' ; ')}`, 422, 'invoice_not_ready');
@@ -292,8 +350,8 @@ function calculateTotals(invoice) {
 
 function hydrateCompany(row) {
   return {
-    id: row.id,
     ...parseJson(row.profile_json, {}),
+    id: row.id,
     createdAt: row.created_at,
     updatedAt: row.updated_at
   };
@@ -317,6 +375,23 @@ function hydrateInvoice(row) {
     updatedAt: row.updated_at,
     finalizedAt: row.finalized_at
   };
+}
+
+function normalizeAddress(address = {}) {
+  const safe = address && typeof address === 'object' ? address : {};
+  return {
+    ...safe,
+    line1: String(safe.line1 || '').trim(),
+    line2: String(safe.line2 || '').trim(),
+    postalCode: String(safe.postalCode || '').trim(),
+    city: String(safe.city || '').trim(),
+    countryCode: normalizeCountryCode(safe.countryCode)
+  };
+}
+
+function normalizeCountryCode(value) {
+  const code = String(value || '').trim().toUpperCase();
+  return /^[A-Z]{2}$/u.test(code) ? code : '';
 }
 
 function digits(value, length) {

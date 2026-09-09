@@ -10,7 +10,14 @@ function setup() {
     legalName: 'Test Plomberie',
     siren: '123456789',
     siret: '12345678900010',
-    address: { line1: '1 rue du Test', postalCode: '73000', city: 'Chambéry', countryCode: 'FR' }
+    address: { line1: '1 rue du Test', postalCode: '73000', city: 'Chambéry', countryCode: 'FR' },
+    reform: {
+      companySizeCategory: 'tpe',
+      establishedInFrance: true,
+      supportsInternational: false,
+      chorusProEnabled: false,
+      paConnection: null
+    }
   });
   return { db, repository, company };
 }
