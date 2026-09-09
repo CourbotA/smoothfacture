@@ -24,8 +24,12 @@ import {
 } from '../src/domain/invoiceModel.js';
 import { validateElectronicInvoiceReadiness } from '../src/domain/invoiceCompliance.js';
 import {
+  isCompanyOnboardingComplete,
+  markCompanyOnboardingComplete,
+  normalizeCompanySetup
+} from '../src/domain/companyProfileSetup.js';
+import {
   hasReducedVatRate,
-  recalculateInvoiceTax,
   setInvoiceTaxTreatment,
   setLineVatRate,
   setReducedRateCertification,
@@ -41,6 +45,8 @@ import {
   saveInvoiceDraft,
   syncCompanyProfile
 } from './src/services/smoothfactureApi.js';
+import OnboardingScreen from './src/screens/OnboardingScreen.js';
+import AccountScreen from './src/screens/AccountScreen.js';
 
 const EXAMPLE_TEXT = `Monsieur et Madame Thierry Hornoy
 7 rue de la Barre 62180 Neuville-Saint-Vaast
@@ -68,7 +74,11 @@ export default function App() {
   const dictationBaseRef = useRef('');
 
   useEffect(() => {
-    loadCompanyProfile().then(setCompanyProfile);
+    loadCompanyProfile().then(profile => {
+      const normalized = normalizeCompanySetup(profile);
+      setCompanyProfile(normalized);
+      setScreen(isCompanyOnboardingComplete(normalized) ? 'create' : 'onboarding');
+    });
   }, []);
 
   useSpeechRecognitionEvent('start', () => {
@@ -132,7 +142,7 @@ export default function App() {
       return {
         envelope,
         invoice,
-        readiness: validateElectronicInvoiceReadiness(invoice),
+        readiness: validateElectronicInvoiceReadiness(invoice, { companyProfile }),
         serverRecord: null,
         dirty: true
       };
@@ -156,7 +166,7 @@ export default function App() {
       return {
         ...entry,
         invoice,
-        readiness: validateElectronicInvoiceReadiness(invoice),
+        readiness: validateElectronicInvoiceReadiness(invoice, { companyProfile }),
         dirty: true
       };
     }));
@@ -188,7 +198,7 @@ export default function App() {
     setResults(current => current.map((candidate, index) => index === activeIndex ? {
       ...candidate,
       invoice: record.invoice,
-      readiness: validateElectronicInvoiceReadiness(record.invoice),
+      readiness: validateElectronicInvoiceReadiness(record.invoice, { companyProfile: syncedCompany }),
       serverRecord: record,
       dirty: false
     } : candidate));
@@ -223,7 +233,7 @@ export default function App() {
       setResults(current => current.map((candidate, index) => index === activeIndex ? {
         ...candidate,
         invoice: record.invoice,
-        readiness: validateElectronicInvoiceReadiness(record.invoice),
+        readiness: validateElectronicInvoiceReadiness(record.invoice, { companyProfile }),
         serverRecord: record,
         dirty: false
       } : candidate));
@@ -235,29 +245,62 @@ export default function App() {
     }
   };
 
-  const handleCompanySave = async () => {
-    const local = recalculateCompanyTaxDefaults(companyProfile);
+  const persistCompany = async (nextProfile, { targetScreen = 'create', successTitle = null, successMessage = null } = {}) => {
+    const local = normalizeCompanySetup(nextProfile);
     await saveCompanyProfile(local);
     setCompanyProfile(local);
 
     if (!isBackendConfigured()) {
-      Alert.alert('Enregistré sur cet appareil', 'Le serveur n’est pas encore configuré. La création reste disponible hors ligne.');
-      setScreen('create');
-      return;
+      setScreen(targetScreen);
+      if (successTitle) Alert.alert(successTitle, successMessage || 'Enregistré sur cet appareil.');
+      return local;
     }
 
-    setBackendBusy(true);
     try {
       const synced = await syncCompanyProfile(local);
       setCompanyProfile(synced);
       await saveCompanyProfile(synced);
-      Alert.alert('Entreprise synchronisée', 'Votre profil est maintenant enregistré sur le serveur de facturation.');
-      setScreen('create');
+      setScreen(targetScreen);
+      if (successTitle) Alert.alert(successTitle, successMessage || 'Votre profil a été synchronisé.');
+      return synced;
     } catch (caught) {
+      setScreen(targetScreen);
       Alert.alert('Enregistré localement', `La synchronisation serveur a échoué : ${caught.message}`);
+      return local;
+    }
+  };
+
+  const handleOnboardingComplete = async draftProfile => {
+    setBackendBusy(true);
+    try {
+      const completed = markCompanyOnboardingComplete(draftProfile);
+      await persistCompany(completed, { targetScreen: 'create' });
+    } catch (caught) {
+      Alert.alert('Configuration incomplète', caught.message || 'Vérifiez les informations demandées.');
     } finally {
       setBackendBusy(false);
     }
+  };
+
+  const handleCompanySave = async draftProfile => {
+    setBackendBusy(true);
+    try {
+      await persistCompany(draftProfile, {
+        targetScreen: 'account',
+        successTitle: 'Compte enregistré',
+        successMessage: 'Vos réglages seront réutilisés sur les prochaines factures.'
+      });
+    } finally {
+      setBackendBusy(false);
+    }
+  };
+
+  const restartOnboarding = () => {
+    setCompanyProfile(current => ({
+      ...current,
+      onboarding: { ...(current.onboarding || {}), lastStep: 0 }
+    }));
+    setScreen('onboarding');
   };
 
   const reset = () => {
@@ -279,13 +322,26 @@ export default function App() {
             <Text style={styles.brand}>Facture Facile</Text>
             <Text style={styles.brandCaption}>Les factures d’artisans, sans paperasse.</Text>
           </View>
-          <Pressable style={styles.profileButton} onPress={() => setScreen(screen === 'company' ? 'create' : 'company')}>
-            <Text style={styles.profileButtonText}>{screen === 'company' ? 'Créer' : 'Mon entreprise'}</Text>
-          </Pressable>
+          {screen !== 'onboarding' && <Pressable style={styles.profileButton} onPress={() => setScreen(screen === 'account' ? 'create' : 'account')}>
+            <Text style={styles.profileButtonText}>{screen === 'account' ? 'Créer' : 'Compte'}</Text>
+          </Pressable>}
         </View>
 
-        {screen === 'company' ? (
-          <CompanyScreen profile={companyProfile} onChange={setCompanyProfile} onSave={handleCompanySave} busy={backendBusy} />
+        {screen === 'onboarding' ? (
+          <OnboardingScreen
+            profile={companyProfile}
+            onChange={setCompanyProfile}
+            onComplete={handleOnboardingComplete}
+            busy={backendBusy}
+          />
+        ) : screen === 'account' ? (
+          <AccountScreen
+            profile={companyProfile}
+            onChange={setCompanyProfile}
+            onSave={handleCompanySave}
+            onRestartOnboarding={restartOnboarding}
+            busy={backendBusy}
+          />
         ) : (
           <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
             {!active ? (
@@ -480,52 +536,6 @@ function ReviewScreen({ entry, totals, activeIndex, count, onSelect, onBack, upd
   );
 }
 
-function CompanyScreen({ profile, onChange, onSave, busy }) {
-  const update = (section, field, value) => onChange(current => section
-    ? { ...current, [section]: { ...current[section], [field]: value } }
-    : { ...current, [field]: value });
-
-  const setVatRegime = regime => onChange(current => ({
-    ...current,
-    tax: regime === VAT_REGIMES.EXEMPT_293B
-      ? { ...current.tax, vatRegime: regime, defaultVatRate: 0, exemptionReason: VAT_EXEMPTION_293B }
-      : { ...current.tax, vatRegime: regime, defaultVatRate: current.tax?.defaultVatRate && current.tax.defaultVatRate !== 0 ? current.tax.defaultVatRate : 20, exemptionReason: '' }
-  }));
-
-  return (
-    <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
-      <Text style={styles.eyebrow}>P0 · IDENTITÉ ENTREPRISE</Text>
-      <Text style={styles.title}>Les informations qui signent vos factures.</Text>
-      <Text style={styles.subtitle}>Le profil reste disponible sur cet appareil et, lorsque le serveur est configuré, il est synchronisé pour la numérotation et l’historique.</Text>
-      <View style={styles.card}>
-        <Field label="Nom légal" value={profile.legalName} onChange={value => update(null, 'legalName', value)} />
-        <Field label="SIREN" keyboardType="number-pad" value={profile.siren} onChange={value => update(null, 'siren', value.replace(/\D/g, '').slice(0, 9))} />
-        <Field label="SIRET" keyboardType="number-pad" value={profile.siret} onChange={value => update(null, 'siret', value.replace(/\D/g, '').slice(0, 14))} />
-        <Field label="Adresse" value={profile.address.line1} onChange={value => update('address', 'line1', value)} />
-        <Field label="Code postal" keyboardType="number-pad" value={profile.address.postalCode} onChange={value => update('address', 'postalCode', value.replace(/\D/g, '').slice(0, 5))} />
-        <Field label="Ville" value={profile.address.city} onChange={value => update('address', 'city', value)} />
-        <Field label="E-mail" keyboardType="email-address" value={profile.contact.email} onChange={value => update('contact', 'email', value)} />
-        <Field label="Téléphone" keyboardType="phone-pad" value={profile.contact.phone} onChange={value => update('contact', 'phone', value)} />
-      </View>
-
-      <View style={styles.card}>
-        <Text style={styles.cardKicker}>RÉGIME TVA</Text>
-        <View style={styles.segmentRow}>
-          <Choice label="Franchise 293 B" selected={profile.tax?.vatRegime !== VAT_REGIMES.STANDARD} onPress={() => setVatRegime(VAT_REGIMES.EXEMPT_293B)} />
-          <Choice label="Assujetti TVA" selected={profile.tax?.vatRegime === VAT_REGIMES.STANDARD} onPress={() => setVatRegime(VAT_REGIMES.STANDARD)} />
-        </View>
-        {profile.tax?.vatRegime === VAT_REGIMES.STANDARD ? <>
-          <Text style={[styles.fieldLabel, styles.sectionGap]}>Taux par défaut</Text>
-          <View style={styles.categoryWrap}>{VAT_RATES.map(rate => <Choice key={rate} label={`${formatRate(rate)} %`} selected={Number(profile.tax?.defaultVatRate) === rate} onPress={() => update('tax', 'defaultVatRate', rate)} />)}</View>
-          <Text style={styles.help}>Le taux par défaut initialise les lignes. Vous pourrez choisir 20 %, 10 % ou 5,5 % ligne par ligne avant finalisation.</Text>
-        </> : <Text style={[styles.help, styles.sectionGap]}>{profile.tax?.exemptionReason || VAT_EXEMPTION_293B}</Text>}
-      </View>
-
-      <Pressable disabled={busy} style={[styles.primaryButton, busy && styles.disabledButton]} onPress={onSave}><Text style={styles.primaryButtonText}>{busy ? 'Synchronisation…' : 'Enregistrer mon entreprise'}</Text></Pressable>
-    </ScrollView>
-  );
-}
-
 function Field({ label, value, onChange, multiline = false, keyboardType = 'default' }) {
   return <View style={styles.field}><Text style={styles.fieldLabel}>{label}</Text><TextInput style={[styles.input, multiline && styles.inputMultiline]} value={String(value || '')} onChangeText={onChange} multiline={multiline} keyboardType={keyboardType} textAlignVertical={multiline ? 'top' : 'center'} /></View>;
 }
@@ -554,13 +564,6 @@ function parseAddress(value) {
     city: match?.[2]?.trim() || '',
     countryCode: 'FR'
   };
-}
-
-function recalculateCompanyTaxDefaults(profile) {
-  if (profile?.tax?.vatRegime === VAT_REGIMES.STANDARD) {
-    return { ...profile, tax: { ...profile.tax, defaultVatRate: Number(profile.tax.defaultVatRate) || 20, exemptionReason: '' } };
-  }
-  return { ...profile, tax: { ...profile.tax, vatRegime: VAT_REGIMES.EXEMPT_293B, defaultVatRate: 0, exemptionReason: profile?.tax?.exemptionReason || VAT_EXEMPTION_293B } };
 }
 
 function formatEuro(value) {
