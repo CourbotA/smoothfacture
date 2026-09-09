@@ -59,9 +59,14 @@ function interpretChunk(rawLines, chunkIndex) {
 
   const items = [];
   const itemFields = [];
+  let currentDate = workDate?.displayValue || '-';
   lines.forEach((line, index) => {
+    if (isDateOnly(line)) {
+      currentDate = extractDateInfo(line).displayValue;
+      return;
+    }
     if (consumed.has(index) || isFiller(line)) return;
-    const parsed = interpretItem(line, workDate?.displayValue || '-');
+    const parsed = interpretItem(line, currentDate);
     if (!parsed) return;
 
     const itemId = `item-${chunkIndex}-${items.length}`;
@@ -271,7 +276,7 @@ function extractCustomerName(lines, consumed, addressResult) {
       sourceText = line;
       candidate = stripNameContext(line);
       status = /\b(?:monsieur|madame|mr|mme)\b/iu.test(line) ? 'uncertain' : 'confident';
-      reason = status === 'uncertain' ? 'Les civilités ont été retirées sans modifier l’orthographe du nom.' : '';
+      reason = status === 'uncertain' ? 'Vérifiez le nom et les civilités, conservés depuis vos notes.' : '';
       consumed.add(index);
       break;
     }
@@ -471,7 +476,7 @@ function extractTownBeforeStreet(line) {
 
 function stripNameContext(value) {
   const result = sanitizeLine(value)
-    .replace(/^(?:alors\s+)?(?:monsieur|madame|m\.?|mme\.?)(?:\s+(?:et|madame|monsieur))?\s+/iu, '')
+    .replace(/^alors\s+/iu, '')
     .replace(new RegExp(`\\s+\\b\\d{1,4}(?:\\s*(?:bis|ter))?\\s+(?:${STREET_TYPES})\\b.*$`, 'iu'), '')
     .replace(/\s+(?:à|a)\s+[\p{L}][\p{L}'’ -]{1,45}$/iu, '')
     .replace(/^(?:client|chez)\s+/iu, '')
@@ -503,7 +508,7 @@ function normalizeDescription(value) {
 }
 
 function needsDescriptionReview(description) {
-  return /\b(?:serinite|pate\s+wc)\b/u.test(normalizeForSearch(description));
+  return /\b(?:serinite|pate\s+wc|meuble\s+d[eé]placement)\b/u.test(normalizeForSearch(description));
 }
 
 function normalizePriceNotation(value) {
@@ -522,7 +527,8 @@ function extractFrenchWordAmount(line) {
   let numberStart = tokens.length;
   while (numberStart > 0 && FRENCH_NUMBER_WORDS.has(tokens[numberStart - 1])) numberStart -= 1;
   if (numberStart === tokens.length) return null;
-  const descriptionTail = match[2].split(/\s+/u).slice(0, numberStart).join(' ');
+  const originalTokens = match[2].split(/[\s-]+/u);
+  const descriptionTail = originalTokens.slice(0, numberStart).join(' ');
   const description = sanitizeLine(`${match[1]} ${descriptionTail}`);
   const amount = parseFrenchNumber(tokens.slice(numberStart));
   return Number.isFinite(amount) && description ? { description, amount } : null;
@@ -531,7 +537,13 @@ function extractFrenchWordAmount(line) {
 function parseFrenchNumber(tokens) {
   const values = { zero: 0, un: 1, une: 1, deux: 2, trois: 3, quatre: 4, cinq: 5, six: 6, sept: 7, huit: 8, neuf: 9, dix: 10, onze: 11, douze: 12, treize: 13, quatorze: 14, quinze: 15, seize: 16, vingt: 20, vingts: 20, trente: 30, quarante: 40, cinquante: 50, soixante: 60 };
   let current = 0;
-  for (const token of tokens) {
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (token === 'quatre' && /^(vingt|vingts)$/.test(tokens[index + 1] || '')) {
+      current += 80;
+      index += 1;
+      continue;
+    }
     if (token === 'et') continue;
     if (token === 'cent' || token === 'cents') current = (current || 1) * 100;
     else if (token in values) current += values[token];

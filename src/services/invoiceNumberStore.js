@@ -51,12 +51,12 @@ function writeLastInvoiceNumber(value) {
 }
 
 function readFromStorage() {
-  if (typeof window === 'undefined' || !window.localStorage) {
+  if (typeof window === 'undefined') {
     return null;
   }
 
   try {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
+    const raw = window.localStorage?.getItem(STORAGE_KEY);
     if (raw == null) {
       return null;
     }
@@ -69,12 +69,12 @@ function readFromStorage() {
 }
 
 function writeToStorage(value) {
-  if (typeof window === 'undefined' || !window.localStorage) {
+  if (typeof window === 'undefined') {
     return;
   }
 
   try {
-    window.localStorage.setItem(STORAGE_KEY, String(value));
+    window.localStorage?.setItem(STORAGE_KEY, String(value));
   } catch {
     // Ignore storage write failures (private mode/quota restrictions).
   }
